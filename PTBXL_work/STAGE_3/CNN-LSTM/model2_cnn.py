@@ -36,7 +36,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
-from sklearn.metrics import roc_auc_score, f1_score, classification_report
+from sklearn.metrics import roc_auc_score, f1_score, classification_report, multilabel_confusion_matrix
 import time
 import csv
 import json
@@ -45,10 +45,66 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 SUPERCLASSES = ["NORM", "MI", "STTC", "CD", "HYP"]
 N_CLASSES    = 5
 OUTPUT_DIR   = Path(__file__).resolve().parent / "outputs"
+OUTPUT_DIR_ES = OUTPUT_DIR / "es"
+OUTPUT_DIR_EN = OUTPUT_DIR / "en"
+
+# ── Paleta fija del proyecto (no generica) ─────────────────────────────
+# Una entrada por superclase, en el mismo orden en TODAS las figuras de
+# los 5 modelos de STAGE_3 (consistencia visual entre modelos).
+PALETTE = ["blueviolet", "mediumblue", "aquamarine", "lightcoral", "gold"]
+CLASS_COLORS = dict(zip(SUPERCLASSES, PALETTE))
+# Colormap secuencial para las matrices de confusion (blanco -> mediumblue),
+# en vez de un colormap generico tipo "Blues"/"viridis".
+CM_CMAP = LinearSegmentedColormap.from_list("ptbxl_cm", ["#ffffff", "mediumblue"])
+
+MODEL_NAME = "CNN_LSTM (V1 — último estado oculto)"
+
+# ── Textos ES/EN para graficos (mismos datos, mismos ejes) ────────────
+TEXTS = {
+    "es": {
+        "loss_title": "Pérdida (BCEWithLogitsLoss)",
+        "epoch": "Época",
+        "loss_ylabel": "Loss",
+        "train": "train",
+        "val": "val",
+        "metrics_title": "Métricas de validación",
+        "score_ylabel": "Score",
+        "auc_label": "AUC macro (val)",
+        "f1_label": "F1 macro (val)",
+        "curves_suptitle": "{model} — curvas de entrenamiento",
+        "f1_title": "F1-score por clase — test (fold 10)",
+        "f1_ylabel": "F1-score",
+        "cm_suptitle": "{model} — matrices de confusión por clase (test, fold 10, umbral=0.5)",
+        "predicted": "Predicho",
+        "actual": "Real",
+        "neg": "Negativo",
+        "pos": "Positivo",
+    },
+    "en": {
+        "loss_title": "Loss (BCEWithLogitsLoss)",
+        "epoch": "Epoch",
+        "loss_ylabel": "Loss",
+        "train": "train",
+        "val": "val",
+        "metrics_title": "Validation metrics",
+        "score_ylabel": "Score",
+        "auc_label": "AUC macro (val)",
+        "f1_label": "F1 macro (val)",
+        "curves_suptitle": "{model} — training curves",
+        "f1_title": "F1-score per class — test (fold 10)",
+        "f1_ylabel": "F1-score",
+        "cm_suptitle": "{model} — per-class confusion matrices (test, fold 10, threshold=0.5)",
+        "predicted": "Predicted",
+        "actual": "Actual",
+        "neg": "Negative",
+        "pos": "Positive",
+    },
+}
 
 # ── Import del pipeline de la Etapa 2 (STAGE_2/multi-label_pipeline.py) ─
 # Debe hacerse a nivel de módulo (no dentro de "if __name__ == '__main__':")
@@ -268,7 +324,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device, return_raw: bool = False):
     model.eval()
     total_loss, all_labels, all_probs = 0.0, [], []
     for signals, labels in loader:
@@ -281,7 +337,20 @@ def evaluate(model, loader, criterion, device):
 
     all_probs  = np.vstack(all_probs)
     all_labels = np.vstack(all_labels)
-    return total_loss / len(loader), compute_metrics(all_labels, all_probs)
+    metrics = compute_metrics(all_labels, all_probs)
+    avg_loss = total_loss / len(loader)
+    if return_raw:
+        return avg_loss, metrics, all_labels, all_probs
+    return avg_loss, metrics
+
+
+def compute_confusion_matrices(all_labels: np.ndarray,
+                               all_probs:  np.ndarray,
+                               threshold:  float = 0.5) -> np.ndarray:
+    """Matriz de confusión binaria por superclase (esquema multi-label).
+    Retorna array (n_clases, 2, 2): [[TN, FP], [FN, TP]] por clase."""
+    all_preds = (all_probs >= threshold).astype(int)
+    return multilabel_confusion_matrix(all_labels, all_preds)
 
 
 # ── ENTRENAMIENTO COMPLETO ────────────────────────────────────────────
@@ -364,7 +433,9 @@ def evaluate_on_test(model_path, test_loader, pos_weights):
     model.load_state_dict(checkpoint["model_state"])
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weights.to(device))
-    test_loss, test_metrics = evaluate(model, test_loader, criterion, device)
+    test_loss, test_metrics, all_labels, all_probs = evaluate(
+        model, test_loader, criterion, device, return_raw=True
+    )
 
     print("\n" + "=" * 60)
     print("RESULTADOS FINALES — TEST (fold 10)")
@@ -378,7 +449,8 @@ def evaluate_on_test(model_path, test_loader, pos_weights):
     print("=" * 60)
 
     test_metrics["loss"] = float(test_loss)
-    return test_metrics
+    cms = compute_confusion_matrices(all_labels, all_probs)
+    return test_metrics, cms
 
 
 # ── GUARDADO DE RESULTADOS (outputs/) ─────────────────────────────────
@@ -396,54 +468,84 @@ def save_history_csv(history: dict, path: Path) -> None:
             writer.writerow([i + 1] + [history[k][i] for k in keys])
 
 
-def plot_training_curves(history: dict, path: Path) -> None:
+def plot_training_curves(history: dict, path: Path, lang: str = "es") -> None:
     """Grafica loss (train/val) y AUC/F1 de validación por época."""
+    t = TEXTS[lang]
     epochs = range(1, len(history["train_loss"]) + 1)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
-    axes[0].plot(epochs, history["train_loss"], label="train")
-    axes[0].plot(epochs, history["val_loss"], label="val")
-    axes[0].set_title("Pérdida (BCEWithLogitsLoss)")
-    axes[0].set_xlabel("Época")
-    axes[0].set_ylabel("Loss")
+    axes[0].plot(epochs, history["train_loss"], label=t["train"], color=PALETTE[0])
+    axes[0].plot(epochs, history["val_loss"], label=t["val"], color=PALETTE[1])
+    axes[0].set_title(t["loss_title"])
+    axes[0].set_xlabel(t["epoch"])
+    axes[0].set_ylabel(t["loss_ylabel"])
     axes[0].legend()
 
-    axes[1].plot(epochs, history["val_auc"], label="AUC macro (val)", color="tab:green")
-    axes[1].plot(epochs, history["val_f1"], label="F1 macro (val)", color="tab:orange")
-    axes[1].set_title("Métricas de validación")
-    axes[1].set_xlabel("Época")
-    axes[1].set_ylabel("Score")
+    axes[1].plot(epochs, history["val_auc"], label=t["auc_label"], color=PALETTE[3])
+    axes[1].plot(epochs, history["val_f1"], label=t["f1_label"], color=PALETTE[4])
+    axes[1].set_title(t["metrics_title"])
+    axes[1].set_xlabel(t["epoch"])
+    axes[1].set_ylabel(t["score_ylabel"])
     axes[1].set_ylim(0, 1)
     axes[1].legend()
 
-    fig.suptitle("CNN-LSTM — curvas de entrenamiento")
+    fig.suptitle(t["curves_suptitle"].format(model=MODEL_NAME))
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def plot_f1_per_class(test_metrics: dict, path: Path) -> None:
+def plot_f1_per_class(test_metrics: dict, path: Path, lang: str = "es") -> None:
     """Grafica el F1-score por superclase en el fold de test."""
+    t = TEXTS[lang]
     values = [test_metrics[f"f1_{cls}"] for cls in SUPERCLASSES]
+    colors = [CLASS_COLORS[cls] for cls in SUPERCLASSES]
     fig, ax = plt.subplots(figsize=(6, 4))
-    colors = plt.cm.tab10(np.linspace(0, 1, len(SUPERCLASSES)))
     bars = ax.bar(SUPERCLASSES, values, color=colors)
     ax.bar_label(bars, fmt="%.3f", padding=3)
     ax.set_ylim(0, 1)
-    ax.set_title("F1-score por clase — test (fold 10)")
-    ax.set_ylabel("F1-score")
+    ax.set_title(t["f1_title"])
+    ax.set_ylabel(t["f1_ylabel"])
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def save_test_report(test_metrics: dict, json_path: Path, txt_path: Path) -> None:
-    """Guarda las métricas de test en JSON (numéricas) y en TXT (legible, con reporte por clase)."""
+def plot_confusion_matrices(cms: np.ndarray, path: Path, lang: str = "es") -> None:
+    """Grafica las 5 matrices de confusión binarias (una por superclase)."""
+    t = TEXTS[lang]
+    tick_labels = [t["neg"], t["pos"]]
+    fig, axes = plt.subplots(1, len(SUPERCLASSES), figsize=(3.2 * len(SUPERCLASSES), 3.6))
+
+    for ax, cls, cm in zip(axes, SUPERCLASSES, cms):
+        vmax = cm.max() if cm.max() > 0 else 1
+        ax.imshow(cm, cmap=CM_CMAP, vmin=0, vmax=vmax)
+        for i in range(2):
+            for j in range(2):
+                value = int(cm[i, j])
+                color = "white" if value > vmax * 0.55 else "#2b2b2b"
+                ax.text(j, i, value, ha="center", va="center", color=color, fontsize=11)
+        ax.set_xticks([0, 1]); ax.set_xticklabels(tick_labels, fontsize=8)
+        ax.set_yticks([0, 1]); ax.set_yticklabels(tick_labels, fontsize=8)
+        ax.set_xlabel(t["predicted"], fontsize=8)
+        ax.set_ylabel(t["actual"], fontsize=8)
+        ax.set_title(cls, color=CLASS_COLORS[cls], fontweight="bold")
+
+    fig.suptitle(t["cm_suptitle"].format(model=MODEL_NAME))
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def save_test_report(test_metrics: dict, json_path: Path,
+                     txt_path_es: Path, txt_path_en: Path) -> None:
+    """Guarda las métricas de test en JSON (numéricas, en la raíz de outputs/)
+    y en TXT legible con reporte por clase, uno en es/ y otro en en/."""
     numeric_metrics = {k: v for k, v in test_metrics.items() if k != "classification_report"}
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(numeric_metrics, f, indent=2, ensure_ascii=False)
 
-    lines = [
+    lines_es = [
         "=" * 60,
         "RESULTADOS FINALES — TEST (fold 10)",
         "=" * 60,
@@ -454,19 +556,38 @@ def save_test_report(test_metrics: dict, json_path: Path, txt_path: Path) -> Non
         "F1 por clase:",
     ]
     for cls in SUPERCLASSES:
-        lines.append(f"  {cls:<6} : {test_metrics[f'f1_{cls}']:.4f}")
-    lines.append("")
-    lines.append("Reporte de clasificación (sklearn, umbral=0.5):")
-    lines.append(test_metrics["classification_report"])
-    lines.append("=" * 60)
+        lines_es.append(f"  {cls:<6} : {test_metrics[f'f1_{cls}']:.4f}")
+    lines_es.append("")
+    lines_es.append("Reporte de clasificación (sklearn, umbral=0.5):")
+    lines_es.append(test_metrics["classification_report"])
+    lines_es.append("=" * 60)
+    txt_path_es.write_text("\n".join(lines_es), encoding="utf-8")
 
-    txt_path.write_text("\n".join(lines), encoding="utf-8")
+    lines_en = [
+        "=" * 60,
+        "FINAL RESULTS — TEST (fold 10)",
+        "=" * 60,
+        f"Test loss : {test_metrics['loss']:.4f}",
+        f"AUC macro : {test_metrics['auc_macro']:.4f}",
+        f"F1 macro  : {test_metrics['f1_macro']:.4f}",
+        "",
+        "F1 per class:",
+    ]
+    for cls in SUPERCLASSES:
+        lines_en.append(f"  {cls:<6} : {test_metrics[f'f1_{cls}']:.4f}")
+    lines_en.append("")
+    lines_en.append("Classification report (sklearn, threshold=0.5):")
+    lines_en.append(test_metrics["classification_report"])
+    lines_en.append("=" * 60)
+    txt_path_en.write_text("\n".join(lines_en), encoding="utf-8")
 
 
 # ── PUNTO DE ENTRADA ──────────────────────────────────────────────────
 
 if __name__ == "__main__":
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR_ES.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR_EN.mkdir(parents=True, exist_ok=True)
     checkpoint_path = OUTPUT_DIR / "best_cnn_lstm.pt"
 
     # ── Ajustes para Ryzen 5 5600X + GPU 8 GB VRAM (RTX 5050) ──────────
@@ -489,11 +610,20 @@ if __name__ == "__main__":
     )
 
     save_history_csv(history, OUTPUT_DIR / "training_history.csv")
-    plot_training_curves(history, OUTPUT_DIR / "training_curves.png")
+    plot_training_curves(history, OUTPUT_DIR_ES / "training_curves.png", lang="es")
+    plot_training_curves(history, OUTPUT_DIR_EN / "training_curves.png", lang="en")
 
-    test_metrics = evaluate_on_test(str(checkpoint_path), test_loader, pos_weights)
+    test_metrics, cms = evaluate_on_test(str(checkpoint_path), test_loader, pos_weights)
 
-    save_test_report(test_metrics, OUTPUT_DIR / "test_metrics.json", OUTPUT_DIR / "test_metrics.txt")
-    plot_f1_per_class(test_metrics, OUTPUT_DIR / "test_f1_per_class.png")
+    save_test_report(
+        test_metrics, OUTPUT_DIR / "test_metrics.json",
+        OUTPUT_DIR_ES / "test_metrics.txt", OUTPUT_DIR_EN / "test_metrics.txt",
+    )
+    plot_f1_per_class(test_metrics, OUTPUT_DIR_ES / "test_f1_per_class.png", lang="es")
+    plot_f1_per_class(test_metrics, OUTPUT_DIR_EN / "test_f1_per_class.png", lang="en")
+    plot_confusion_matrices(cms, OUTPUT_DIR_ES / "confusion_matrices.png", lang="es")
+    plot_confusion_matrices(cms, OUTPUT_DIR_EN / "confusion_matrices.png", lang="en")
 
     print(f"\nResultados guardados en: {OUTPUT_DIR}")
+    print(f"Graficos + reportes ES en: {OUTPUT_DIR_ES}")
+    print(f"Graficos + reportes EN en: {OUTPUT_DIR_EN}")

@@ -1,0 +1,43 @@
+======================================================================
+PTB-XL - Class distribution map (STAGE 1)
+======================================================================
+Total records (ECGs): 21799
+
+Distribution by diagnostic superclass (multi-label):
+  - NORM                     9514 records  (43.64%)
+  - MI                       5469 records  (25.09%)
+  - STTC                     5235 records  (24.01%)
+  - CD                       4898 records  (22.47%)
+  - HYP                      2649 records  (12.15%)
+  - NO_DIAGNOSTIC_LABEL       411 records  (1.89%)
+
+Imbalance ratio (majority class / minority class): 3.59x
+  Majority: NORM  |  Minority: HYP
+
+Diagnosis: MODERATE IMBALANCE (ratio 3.59x)
+
+Label cardinality per record (how many superclasses per ECG):
+  - 0 label(s): 411 records
+  - 1 label(s): 16244 records
+  - 2 label(s): 4068 records
+  - 3 label(s): 919 records
+  - 4 label(s): 157 records
+
+Recommended strategy: Weighted Cross-Entropy
+  (consistent with the PTB-XL literature, e.g. Wagner et al. 2020 and later multi-label ECG classification work).
+  Suggested per-class weights (see class_weights_recommendation.csv):
+    - NORM   pos_weight(BCE)=  1.2913 | balanced_weight=  0.4583
+    - MI     pos_weight(BCE)=  2.9859 | balanced_weight=  0.7972
+    - STTC   pos_weight(BCE)=  3.1641 | balanced_weight=  0.8328
+    - CD     pos_weight(BCE)=  3.4506 | balanced_weight=  0.8901
+    - HYP    pos_weight(BCE)=  7.2291 | balanced_weight=  1.6458
+
+Application notes:
+  - PTB-XL is multi-label (one ECG can have several superclasses or none).
+  - For BCEWithLogitsLoss(pos_weight=...) use the 'pos_weight_bce' column.
+  - For CrossEntropyLoss in a single-label scenario (one superclass per ECG,
+    after resolving multi-label cases), use 'balanced_weight_sklearn_style'.
+  - strat_fold already comes balanced by the dataset (10 folds, fold 10 = official test);
+    check class_distribution_by_fold.csv to confirm the imbalance stays similar
+    across all folds before training.
+======================================================================

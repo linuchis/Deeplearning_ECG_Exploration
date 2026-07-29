@@ -1,0 +1,35 @@
+==============================================================================
+COMPARACION DE LOS 5 MODELOS - PTB-XL (test, fold 10)
+==============================================================================
+
+Tabla de metricas:
+Modelo                        AUC macro  F1 macro  F1_NORM    F1_MI  F1_STTC    F1_CD   F1_HYP
+----------------------------------------------------------------------------------------------
+CNN1D_ResNet                     0.9185    0.7129   0.8774   0.7153   0.7718   0.7509   0.4492
+CNN_LSTM V1                      0.9089    0.6907   0.8709   0.7002   0.7273   0.7237   0.4314
+CNN_LSTM V2 (max-pool)           0.9141    0.6977   0.8784   0.7226   0.7359   0.7507   0.4010
+ECGTransformer V1                0.8910    0.6622   0.8674   0.6161   0.7463   0.6923   0.3890
+ECGTransformer V2 (reg.)         0.8956    0.6643   0.8622   0.6135   0.7284   0.7151   0.4022
+
+Ranking por AUC macro:
+  1. CNN1D_ResNet                 0.9185
+  2. CNN_LSTM V2 (max-pool)       0.9141
+  3. CNN_LSTM V1                  0.9089
+  4. ECGTransformer V2 (reg.)     0.8956
+  5. ECGTransformer V1            0.8910
+
+Ranking por F1 macro:
+  1. CNN1D_ResNet                 0.7129
+  2. CNN_LSTM V2 (max-pool)       0.6977
+  3. CNN_LSTM V1                  0.6907
+  4. ECGTransformer V2 (reg.)     0.6643
+  5. ECGTransformer V1            0.6622
+
+Evolucion V1 -> V2:
+  CNN_LSTM         AUC: +0.0052   F1 macro: +0.0070
+  ECGTransformer   AUC: +0.0046   F1 macro: +0.0021
+
+Nota: los 5 modelos comparten dataset, tarea y metricas (a diferencia
+de la comparacion entre bloques de CHAP-SHA-500HZ_work), por lo que
+todas las metricas son directamente comparables 1 a 1.
+==============================================================================

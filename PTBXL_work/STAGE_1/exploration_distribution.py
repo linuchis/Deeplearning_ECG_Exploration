@@ -17,10 +17,20 @@ Salidas (en STAGE_1/outputs/):
     - class_distribution_by_fold.csv      -> conteo por clase y strat_fold (1-10)
     - label_cardinality.csv               -> distribucion del numero de etiquetas por registro
     - class_weights_recommendation.csv    -> pesos sugeridos para weighted cross-entropy
-    - class_distribution_overview.png     -> grafico de barras del conteo por clase
-    - class_distribution_by_fold.png      -> heatmap de conteo por clase x fold
-    - class_cooccurrence.png              -> heatmap de co-ocurrencia entre clases
-    - summary_report.txt                  -> resumen textual con el diagnostico de desbalance
+    - es/summary_report.txt               -> resumen textual en espanol
+    - en/summary_report.txt               -> resumen textual en ingles
+    - es/*.png                            -> graficos con textos/leyendas en espanol
+    - en/*.png                            -> mismos graficos con textos/leyendas en ingles
+
+    Las tablas CSV son independientes del idioma (nombres de clase NORM/MI/
+    STTC/CD/HYP y columnas numericas), por lo que viven una sola vez en la
+    raiz de outputs/. Lo que se duplica en es/ y en/ es todo lo que un
+    lector interpreta como texto: graficos y el resumen narrativo.
+
+Paleta:
+    Se usa una paleta fija no generica para todas las figuras del proyecto:
+    blueviolet, mediumblue, aquamarine, lightcoral, gold (una por superclase,
+    en el orden NORM/MI/STTC/CD/HYP, consistente en todas las figuras).
 
 Uso:
     python exploration_distribution.py --data-dir "C:\\Users\\Lina Castañeda\\Documents\\Originals\\PTBXL-RAW"
@@ -33,10 +43,20 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
 import pandas as pd
 
 SUPERCLASSES = ["NORM", "MI", "STTC", "CD", "HYP"]
+
+# ── Paleta fija del proyecto (no generica) ─────────────────────────────
+# Una entrada por superclase, en el mismo orden en TODAS las figuras.
+PALETTE = ["blueviolet", "mediumblue", "aquamarine", "lightcoral", "gold"]
+CLASS_COLORS = dict(zip(SUPERCLASSES, PALETTE))
+
+# Colormaps secuenciales construidos con la misma paleta (para heatmaps),
+# en vez de colormaps genericos tipo viridis/magma.
+CMAP_BY_FOLD = LinearSegmentedColormap.from_list("ptbxl_by_fold", ["#ffffff", "blueviolet"])
+CMAP_COOCCURRENCE = LinearSegmentedColormap.from_list("ptbxl_cooc", ["#ffffff", "mediumblue"])
 
 
 def parse_args():
@@ -139,22 +159,51 @@ def compute_class_weights(mat: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_class_distribution(dist: pd.DataFrame, output_path: Path):
+# ── Textos por idioma (graficos + resumen) ─────────────────────────────
+
+TEXTS = {
+    "es": {
+        "dist_title": "Distribución de clases - PTB-XL (superclase diagnóstica)",
+        "dist_xlabel": "Superclase diagnóstica",
+        "dist_ylabel": "Número de registros (multi-label)",
+        "dist_unlabeled": "Sin etiqueta diagnóstica: {n} ({pct}%)",
+        "fold_title": "Conteo por clase y fold estratificado",
+        "fold_xlabel": "strat_fold (10 = fold de test recomendado por PTB-XL)",
+        "fold_cbar": "n° de registros",
+        "cooc_title": "Co-ocurrencia entre superclases (diagonal = total por clase)",
+    },
+    "en": {
+        "dist_title": "Class distribution - PTB-XL (diagnostic superclass)",
+        "dist_xlabel": "Diagnostic superclass",
+        "dist_ylabel": "Number of records (multi-label)",
+        "dist_unlabeled": "No diagnostic label: {n} ({pct}%)",
+        "fold_title": "Count by class and stratified fold",
+        "fold_xlabel": "strat_fold (10 = official PTB-XL test fold)",
+        "fold_cbar": "n. of records",
+        "cooc_title": "Co-occurrence between superclasses (diagonal = total per class)",
+    },
+}
+
+
+def plot_class_distribution(dist: pd.DataFrame, output_path: Path, lang: str):
+    t = TEXTS[lang]
     plot_df = dist[dist["class"] != "NO_DIAGNOSTIC_LABEL"].sort_values("n_records", ascending=False)
     unlabeled = dist[dist["class"] == "NO_DIAGNOSTIC_LABEL"]
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    colors = plt.cm.tab10(np.linspace(0, 1, len(plot_df)))
+    colors = [CLASS_COLORS[c] for c in plot_df["class"]]
     bars = ax.bar(plot_df["class"], plot_df["n_records"], color=colors)
     ax.bar_label(bars, padding=3, fontsize=9)
-    ax.set_title("Distribucion de clases - PTB-XL (superclase diagnostica)")
-    ax.set_xlabel("Superclase diagnostica")
-    ax.set_ylabel("Numero de registros (multi-label)")
+    ax.set_title(t["dist_title"])
+    ax.set_xlabel(t["dist_xlabel"])
+    ax.set_ylabel(t["dist_ylabel"])
     if not unlabeled.empty:
         ax.text(
             0.99, 0.97,
-            f"Sin etiqueta diagnostica: {int(unlabeled['n_records'].iloc[0])} "
-            f"({unlabeled['pct_of_total_records'].iloc[0]}%)",
+            t["dist_unlabeled"].format(
+                n=int(unlabeled["n_records"].iloc[0]),
+                pct=unlabeled["pct_of_total_records"].iloc[0],
+            ),
             transform=ax.transAxes, ha="right", va="top", fontsize=8, color="gray",
         )
     fig.tight_layout()
@@ -162,43 +211,55 @@ def plot_class_distribution(dist: pd.DataFrame, output_path: Path):
     plt.close(fig)
 
 
-def plot_distribution_by_fold(df: pd.DataFrame, mat: pd.DataFrame, output_path: Path):
-    mat_fold = mat.copy()
-    mat_fold["strat_fold"] = df["strat_fold"]
-    by_fold = mat_fold.groupby("strat_fold")[SUPERCLASSES].sum()
+def plot_distribution_by_fold(df: pd.DataFrame, mat: pd.DataFrame, output_path: Path, lang: str,
+                              by_fold: pd.DataFrame = None):
+    t = TEXTS[lang]
+    if by_fold is None:
+        mat_fold = mat.copy()
+        mat_fold["strat_fold"] = df["strat_fold"]
+        by_fold = mat_fold.groupby("strat_fold")[SUPERCLASSES].sum()
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    im = ax.imshow(by_fold.T.values, aspect="auto", cmap="viridis")
+    im = ax.imshow(by_fold.T.values, aspect="auto", cmap=CMAP_BY_FOLD)
     ax.set_xticks(range(len(by_fold.index)))
     ax.set_xticklabels(by_fold.index)
     ax.set_yticks(range(len(SUPERCLASSES)))
     ax.set_yticklabels(SUPERCLASSES)
-    ax.set_xlabel("strat_fold (10 = fold de test recomendado por PTB-XL)")
-    ax.set_title("Conteo por clase y fold estratificado")
+    ax.set_xlabel(t["fold_xlabel"])
+    ax.set_title(t["fold_title"])
+    # Umbral de contraste: texto oscuro sobre celdas claras, blanco sobre celdas oscuras
+    vmax = by_fold.T.values.max()
     for i in range(len(SUPERCLASSES)):
         for j in range(len(by_fold.index)):
-            ax.text(j, i, int(by_fold.T.values[i, j]), ha="center", va="center",
-                     color="white", fontsize=7)
-    fig.colorbar(im, ax=ax, label="n_records")
+            value = int(by_fold.T.values[i, j])
+            text_color = "white" if value > vmax * 0.55 else "#2b2b2b"
+            ax.text(j, i, value, ha="center", va="center",
+                     color=text_color, fontsize=7)
+    fig.colorbar(im, ax=ax, label=t["fold_cbar"])
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     return by_fold
 
 
-def plot_cooccurrence(mat: pd.DataFrame, output_path: Path):
-    cooc = mat.T.dot(mat)
+def plot_cooccurrence(mat: pd.DataFrame, output_path: Path, lang: str, cooc: pd.DataFrame = None):
+    t = TEXTS[lang]
+    if cooc is None:
+        cooc = mat.T.dot(mat)
     fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(cooc.values, cmap="magma")
+    im = ax.imshow(cooc.values, cmap=CMAP_COOCCURRENCE)
     ax.set_xticks(range(len(SUPERCLASSES)))
     ax.set_xticklabels(SUPERCLASSES)
     ax.set_yticks(range(len(SUPERCLASSES)))
     ax.set_yticklabels(SUPERCLASSES)
-    ax.set_title("Co-ocurrencia entre superclases (diagonal = total por clase)")
+    ax.set_title(t["cooc_title"])
+    vmax = cooc.values.max()
     for i in range(len(SUPERCLASSES)):
         for j in range(len(SUPERCLASSES)):
-            ax.text(j, i, int(cooc.values[i, j]), ha="center", va="center",
-                     color="white", fontsize=8)
+            value = int(cooc.values[i, j])
+            text_color = "white" if value > vmax * 0.55 else "#2b2b2b"
+            ax.text(j, i, value, ha="center", va="center",
+                     color=text_color, fontsize=8)
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -206,7 +267,7 @@ def plot_cooccurrence(mat: pd.DataFrame, output_path: Path):
     return cooc
 
 
-def write_summary(
+def write_summary_es(
     output_dir: Path,
     n_total: int,
     dist: pd.DataFrame,
@@ -268,11 +329,76 @@ def write_summary(
     print("\n".join(lines))
 
 
+def write_summary_en(
+    output_dir: Path,
+    n_total: int,
+    dist: pd.DataFrame,
+    ratio: float,
+    max_class: str,
+    min_class: str,
+    weights: pd.DataFrame,
+    cardinality: pd.Series,
+):
+    lines = []
+    lines.append("=" * 70)
+    lines.append("PTB-XL - Class distribution map (STAGE 1)")
+    lines.append("=" * 70)
+    lines.append(f"Total records (ECGs): {n_total}")
+    lines.append("")
+    lines.append("Distribution by diagnostic superclass (multi-label):")
+    for _, row in dist.iterrows():
+        lines.append(f"  - {row['class']:<22} {row['n_records']:>6} records  ({row['pct_of_total_records']}%)")
+    lines.append("")
+    lines.append(f"Imbalance ratio (majority class / minority class): {ratio:.2f}x")
+    lines.append(f"  Majority: {max_class}  |  Minority: {min_class}")
+    lines.append("")
+
+    if ratio >= 5:
+        verdict = "SEVERE IMBALANCE"
+    elif ratio >= 2:
+        verdict = "MODERATE IMBALANCE"
+    else:
+        verdict = "MILD IMBALANCE"
+    lines.append(f"Diagnosis: {verdict} (ratio {ratio:.2f}x)")
+    lines.append("")
+
+    lines.append("Label cardinality per record (how many superclasses per ECG):")
+    for n_labels, count in cardinality.items():
+        lines.append(f"  - {n_labels} label(s): {count} records")
+    lines.append("")
+
+    lines.append("Recommended strategy: Weighted Cross-Entropy")
+    lines.append("  (consistent with the PTB-XL literature, e.g. Wagner et al. 2020 "
+                  "and later multi-label ECG classification work).")
+    lines.append("  Suggested per-class weights (see class_weights_recommendation.csv):")
+    for _, row in weights.iterrows():
+        lines.append(
+            f"    - {row['class']:<6} pos_weight(BCE)={row['pos_weight_bce']:>8} "
+            f"| balanced_weight={row['balanced_weight_sklearn_style']:>8}"
+        )
+    lines.append("")
+    lines.append("Application notes:")
+    lines.append("  - PTB-XL is multi-label (one ECG can have several superclasses or none).")
+    lines.append("  - For BCEWithLogitsLoss(pos_weight=...) use the 'pos_weight_bce' column.")
+    lines.append("  - For CrossEntropyLoss in a single-label scenario (one superclass per ECG,")
+    lines.append("    after resolving multi-label cases), use 'balanced_weight_sklearn_style'.")
+    lines.append("  - strat_fold already comes balanced by the dataset (10 folds, fold 10 = official test);")
+    lines.append("    check class_distribution_by_fold.csv to confirm the imbalance stays similar")
+    lines.append("    across all folds before training.")
+    lines.append("=" * 70)
+
+    (output_dir / "summary_report.txt").write_text("\n".join(lines), encoding="utf-8")
+
+
 def main():
     args = parse_args()
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir_es = output_dir / "es"
+    output_dir_en = output_dir / "en"
+    output_dir_es.mkdir(parents=True, exist_ok=True)
+    output_dir_en.mkdir(parents=True, exist_ok=True)
 
     print(f"Cargando metadata desde: {data_dir}")
     df = load_metadata(data_dir)
@@ -294,14 +420,27 @@ def main():
         output_dir / "label_cardinality.csv", index=False
     )
 
-    plot_class_distribution(dist, output_dir / "class_distribution_overview.png")
-    by_fold = plot_distribution_by_fold(df, mat, output_dir / "class_distribution_by_fold.png")
+    # ── Graficos en espanol e ingles (mismos datos, mismos indices) ────
+    plot_class_distribution(dist, output_dir_es / "class_distribution_overview.png", lang="es")
+    plot_class_distribution(dist, output_dir_en / "class_distribution_overview.png", lang="en")
+
+    mat_fold = mat.copy()
+    mat_fold["strat_fold"] = df["strat_fold"]
+    by_fold = mat_fold.groupby("strat_fold")[SUPERCLASSES].sum()
+    plot_distribution_by_fold(df, mat, output_dir_es / "class_distribution_by_fold.png", lang="es", by_fold=by_fold)
+    plot_distribution_by_fold(df, mat, output_dir_en / "class_distribution_by_fold.png", lang="en", by_fold=by_fold)
     by_fold.to_csv(output_dir / "class_distribution_by_fold.csv")
-    plot_cooccurrence(mat, output_dir / "class_cooccurrence.png")
 
-    write_summary(output_dir, n_total, dist, ratio, max_class, min_class, weights, cardinality)
+    cooc = mat.T.dot(mat)
+    plot_cooccurrence(mat, output_dir_es / "class_cooccurrence.png", lang="es", cooc=cooc)
+    plot_cooccurrence(mat, output_dir_en / "class_cooccurrence.png", lang="en", cooc=cooc)
 
-    print(f"\nListo. Resultados guardados en: {output_dir}")
+    write_summary_es(output_dir_es, n_total, dist, ratio, max_class, min_class, weights, cardinality)
+    write_summary_en(output_dir_en, n_total, dist, ratio, max_class, min_class, weights, cardinality)
+
+    print(f"\nListo. Tablas en: {output_dir}")
+    print(f"Graficos + resumen ES en: {output_dir_es}")
+    print(f"Graficos + resumen EN en: {output_dir_en}")
 
 
 if __name__ == "__main__":
