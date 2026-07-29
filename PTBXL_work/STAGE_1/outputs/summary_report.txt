@@ -1,0 +1,43 @@
+======================================================================
+PTB-XL - Mapa de distribucion de clases (STAGE 1)
+======================================================================
+Total de registros (ECGs): 21799
+
+Distribucion por superclase diagnostica (multi-label):
+  - NORM                     9514 registros  (43.64%)
+  - MI                       5469 registros  (25.09%)
+  - STTC                     5235 registros  (24.01%)
+  - CD                       4898 registros  (22.47%)
+  - HYP                      2649 registros  (12.15%)
+  - NO_DIAGNOSTIC_LABEL       411 registros  (1.89%)
+
+Razon de desbalance (clase mayoritaria / clase minoritaria): 3.59x
+  Mayoritaria: NORM  |  Minoritaria: HYP
+
+Diagnostico: DESBALANCE MODERADO (ratio 3.59x)
+
+Cardinalidad de etiquetas por registro (cuantas superclases por ECG):
+  - 0 etiqueta(s): 411 registros
+  - 1 etiqueta(s): 16244 registros
+  - 2 etiqueta(s): 4068 registros
+  - 3 etiqueta(s): 919 registros
+  - 4 etiqueta(s): 157 registros
+
+Estrategia recomendada: Weighted Cross-Entropy
+  (consistente con la literatura de PTB-XL, p.ej. Wagner et al. 2020 y trabajos posteriores de clasificacion multi-label de ECG).
+  Pesos sugeridos por clase (ver class_weights_recommendation.csv):
+    - NORM   pos_weight(BCE)=  1.2913 | balanced_weight=  0.4583
+    - MI     pos_weight(BCE)=  2.9859 | balanced_weight=  0.7972
+    - STTC   pos_weight(BCE)=  3.1641 | balanced_weight=  0.8328
+    - CD     pos_weight(BCE)=  3.4506 | balanced_weight=  0.8901
+    - HYP    pos_weight(BCE)=  7.2291 | balanced_weight=  1.6458
+
+Notas de aplicacion:
+  - PTB-XL es multi-label (un ECG puede tener varias superclases o ninguna).
+  - Para BCEWithLogitsLoss(pos_weight=...) usar la columna 'pos_weight_bce'.
+  - Para CrossEntropyLoss en un escenario single-label (una superclase por ECG,
+    tras resolver casos multi-etiqueta), usar 'balanced_weight_sklearn_style'.
+  - strat_fold ya viene balanceado por el dataset (10 folds, fold 10 = test oficial);
+    verificar en class_distribution_by_fold.csv que el desbalance se mantiene similar
+    en todos los folds antes de entrenar.
+======================================================================

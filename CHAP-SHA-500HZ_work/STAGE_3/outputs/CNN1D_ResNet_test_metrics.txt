@@ -1,0 +1,27 @@
+============================================================
+RESULTADOS TEST — CNN1D_ResNet (Chapman-Shaoxing 500 Hz)
+============================================================
+Loss      : 0.2620
+Accuracy  : 0.9580
+F1 macro  : 0.9537
+F1 wt     : 0.9579
+
+F1 por clase:
+  AFIB  : 0.9464
+  GSVT  : 0.9355
+  SB    : 0.9809
+  SR    : 0.9521
+
+Reporte de clasificación (umbral=argmax):
+              precision    recall  f1-score   support
+
+        AFIB       0.96      0.93      0.95       444
+        GSVT       0.92      0.95      0.94       452
+          SB       0.97      0.99      0.98       778
+          SR       0.97      0.94      0.95       444
+
+    accuracy                           0.96      2118
+   macro avg       0.96      0.95      0.95      2118
+weighted avg       0.96      0.96      0.96      2118
+
+============================================================
