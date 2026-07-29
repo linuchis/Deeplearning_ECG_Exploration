@@ -29,7 +29,7 @@ Salidas (en STAGE_1/outputs/):
 
 Paleta:
     Se usa una paleta fija no generica para todas las figuras del proyecto:
-    blueviolet, mediumblue, aquamarine, lightcoral, gold (una por superclase,
+    darkorchid, seagreen, royalblue, darkorange, firebrick (una por superclase,
     en el orden NORM/MI/STTC/CD/HYP, consistente en todas las figuras).
 
 Uso:
@@ -50,13 +50,18 @@ SUPERCLASSES = ["NORM", "MI", "STTC", "CD", "HYP"]
 
 # ── Paleta fija del proyecto (no generica) ─────────────────────────────
 # Una entrada por superclase, en el mismo orden en TODAS las figuras.
-PALETTE = ["blueviolet", "mediumblue", "aquamarine", "lightcoral", "gold"]
+# Validada con el validador de paletas categoricas (banda de luminosidad,
+# piso de croma, separacion bajo daltonismo protan/deutan, piso de vision
+# normal): darkorchid/seagreen/royalblue/darkorange/firebrick pasan los 4
+# checks duros; solo darkorange queda en WARN de contraste sobre blanco,
+# cubierto porque cada barra ya lleva su valor numerico como etiqueta.
+PALETTE = ["darkorchid", "seagreen", "royalblue", "darkorange", "firebrick"]
 CLASS_COLORS = dict(zip(SUPERCLASSES, PALETTE))
 
 # Colormaps secuenciales construidos con la misma paleta (para heatmaps),
 # en vez de colormaps genericos tipo viridis/magma.
-CMAP_BY_FOLD = LinearSegmentedColormap.from_list("ptbxl_by_fold", ["#ffffff", "blueviolet"])
-CMAP_COOCCURRENCE = LinearSegmentedColormap.from_list("ptbxl_cooc", ["#ffffff", "mediumblue"])
+CMAP_BY_FOLD = LinearSegmentedColormap.from_list("ptbxl_by_fold", ["#ffffff", "darkorchid"])
+CMAP_COOCCURRENCE = LinearSegmentedColormap.from_list("ptbxl_cooc", ["#ffffff", "royalblue"])
 
 
 def parse_args():

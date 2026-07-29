@@ -32,7 +32,7 @@ Genera (bilingue, en outputs/es/ y outputs/en/):
   comparacion_modelos.csv         -> tabla numerica (raiz de outputs/, sin idioma)
   comparison_report.txt (es/en)   -> tabla + conclusiones en texto
 
-Paleta: blueviolet, mediumblue, aquamarine, lightcoral, gold — un color
+Paleta: darkorchid, seagreen, royalblue, darkorange, firebrick — un color
 fijo por modelo, consistente en las 4 figuras.
 =======================================================================
 """
@@ -61,8 +61,10 @@ MODEL_KEYS = [key for key, _, _ in MODELS]
 MODEL_LABELS = {key: label for key, label, _ in MODELS}
 
 # ── Paleta fija del proyecto (no generica): un color fijo por modelo,
-# en el mismo orden en las 4 figuras.
-PALETTE = ["blueviolet", "mediumblue", "aquamarine", "lightcoral", "gold"]
+# en el mismo orden en las 4 figuras. Validada con el validador de
+# paletas categoricas (banda de luminosidad, piso de croma, separacion
+# bajo daltonismo protan/deutan, piso de vision normal).
+PALETTE = ["darkorchid", "seagreen", "royalblue", "darkorange", "firebrick"]
 MODEL_COLORS = dict(zip(MODEL_KEYS, PALETTE))
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"

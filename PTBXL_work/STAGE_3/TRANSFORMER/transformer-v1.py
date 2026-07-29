@@ -63,12 +63,14 @@ OUTPUT_DIR_EN = OUTPUT_DIR / "en"
 
 # ── Paleta fija del proyecto (no generica) ─────────────────────────────
 # Una entrada por superclase, en el mismo orden en TODAS las figuras de
-# los 5 modelos de STAGE_3 (consistencia visual entre modelos).
-PALETTE = ["blueviolet", "mediumblue", "aquamarine", "lightcoral", "gold"]
+# los 5 modelos de STAGE_3 (consistencia visual entre modelos). Validada
+# con el validador de paletas categoricas (banda de luminosidad, piso de
+# croma, separacion bajo daltonismo protan/deutan, piso de vision normal).
+PALETTE = ["darkorchid", "seagreen", "royalblue", "darkorange", "firebrick"]
 CLASS_COLORS = dict(zip(SUPERCLASSES, PALETTE))
-# Colormap secuencial para las matrices de confusion (blanco -> mediumblue),
+# Colormap secuencial para las matrices de confusion (blanco -> royalblue),
 # en vez de un colormap generico tipo "Blues"/"viridis".
-CM_CMAP = LinearSegmentedColormap.from_list("ptbxl_cm", ["#ffffff", "mediumblue"])
+CM_CMAP = LinearSegmentedColormap.from_list("ptbxl_cm", ["#ffffff", "royalblue"])
 
 MODEL_NAME = "ECGTransformer (V1)"
 
