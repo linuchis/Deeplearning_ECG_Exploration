@@ -1,0 +1,27 @@
+============================================================
+RESULTADOS TEST — ECGTransformer (Chapman-Shaoxing 100 Hz, ventana 9 s)
+============================================================
+Loss      : 0.2299
+Accuracy  : 0.9481
+F1 macro  : 0.9432
+F1 wt     : 0.9480
+
+F1 por clase:
+  AFIB  : 0.9392
+  GSVT  : 0.9231
+  SB    : 0.9739
+  SR    : 0.9368
+
+Reporte de clasificación (umbral=argmax):
+              precision    recall  f1-score   support
+
+        AFIB       0.96      0.92      0.94       444
+        GSVT       0.92      0.93      0.92       452
+          SB       0.97      0.98      0.97       778
+          SR       0.94      0.93      0.94       444
+
+    accuracy                           0.95      2118
+   macro avg       0.94      0.94      0.94      2118
+weighted avg       0.95      0.95      0.95      2118
+
+============================================================
