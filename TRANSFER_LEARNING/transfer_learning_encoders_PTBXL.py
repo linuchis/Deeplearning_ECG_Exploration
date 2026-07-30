@@ -42,6 +42,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 from sklearn.metrics import f1_score, accuracy_score
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
 # ── Rutas del proyecto ──────────────────────────────────────────────
 ROOT_DIR   = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
@@ -644,6 +649,91 @@ def save_results_json(transfer_results: dict, path: Path) -> None:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
+# ── Colores fijos del proyecto (mismo orden/paleta que PTBXL_work) ────
+MODEL_COLORS = {
+    "CNN1D_ResNet":   "darkorchid",
+    "CNN_LSTM":       "seagreen",
+    "ECGTransformer": "royalblue",
+}
+MODEL_LABELS = {
+    "CNN1D_ResNet":   "CNN1D-ResNet",
+    "CNN_LSTM":       "CNN-LSTM",
+    "ECGTransformer": "ECGTransformer",
+}
+CHANCE_LEVEL = 0.25   # 1 / N_RHYTHM_CLASSES
+
+
+def plot_fig1_transfer_by_class(transfer_results: dict, output_dir: Path) -> None:
+    """Figura 1: F1 por clase de ritmo (AFIB/GSVT/SB/SR), 3 barras
+    agrupadas por clase (una por modelo transfer)."""
+    model_order = list(PTBXL_CHECKPOINTS.keys())
+    n_models    = len(model_order)
+    x           = np.arange(len(RHYTHM_CLASSES))
+    bar_width   = 0.8 / n_models
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+
+    for i, model_name in enumerate(model_order):
+        values = [transfer_results[model_name][f"f1_{cls}"] for cls in RHYTHM_CLASSES]
+        offset = (i - (n_models - 1) / 2) * bar_width
+        ax.bar(x + offset, values, width=bar_width,
+               label=MODEL_LABELS[model_name], color=MODEL_COLORS[model_name])
+
+    ax.axhline(CHANCE_LEVEL, color="gray", linestyle="--", linewidth=1, label="chance level")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(RHYTHM_CLASSES)
+    ax.set_ylabel("F1-score")
+    ax.set_ylim(0, 1)
+    ax.set_title("Per-class F1 score — PTB-XL encoder transfer to Chapman-Shaoxing")
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(output_dir / "fig1_transfer_by_class.png", dpi=150)
+    plt.close(fig)
+
+
+def plot_fig2_scratch_vs_transfer(transfer_results: dict, output_dir: Path) -> None:
+    """Figura 2: F1 macro por modelo, comparando el baseline entrenado
+    desde cero contra el transfer (linear probing) — mismo color por
+    modelo, hatch "///" para distinguir la barra de transfer."""
+    model_order = list(PTBXL_CHECKPOINTS.keys())
+    x           = np.arange(len(model_order))
+    bar_width   = 0.35
+
+    scratch_values  = [BASELINE_CHAPMAN_FROM_SCRATCH[m]["f1_macro"] for m in model_order]
+    transfer_values = [transfer_results[m]["f1_macro"] for m in model_order]
+    colors          = [MODEL_COLORS[m] for m in model_order]
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+
+    bars_scratch  = ax.bar(x - bar_width / 2, scratch_values, width=bar_width, color=colors)
+    bars_transfer = ax.bar(x + bar_width / 2, transfer_values, width=bar_width, color=colors, hatch="///")
+
+    ax.bar_label(bars_scratch, fmt="%.3f", padding=3)
+    ax.bar_label(bars_transfer, fmt="%.3f", padding=3)
+
+    ax.axhline(CHANCE_LEVEL, color="gray", linestyle="--", linewidth=1)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([MODEL_LABELS[m] for m in model_order])
+    ax.set_ylabel("F1 macro")
+    ax.set_ylim(0, 1.0)
+    ax.set_title("Chapman-Shaoxing F1 macro: from scratch vs. transfer (linear probing)")
+
+    # Leyenda neutra (gris) solo para la distinción sólido/hatch —
+    # el color de cada barra ya identifica el modelo.
+    legend_handles = [
+        Patch(facecolor="lightgray", edgecolor="black", label="From scratch"),
+        Patch(facecolor="lightgray", edgecolor="black", hatch="///", label="Transfer"),
+    ]
+    ax.legend(handles=legend_handles)
+
+    fig.tight_layout()
+    fig.savefig(output_dir / "fig2_scratch_vs_transfer.png", dpi=150)
+    plt.close(fig)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # PUNTO DE ENTRADA
 # ═══════════════════════════════════════════════════════════════════
@@ -699,3 +789,7 @@ if __name__ == "__main__":
     results_path = OUTPUT_DIR / "transfer_results.json"
     save_results_json(transfer_results, results_path)
     print(f"\nResultados guardados en: {results_path}")
+
+    # Figuras 1 y 2 (ver sección "5. TABLA COMPARATIVA FINAL")
+    plot_fig1_transfer_by_class(transfer_results, OUTPUT_DIR)
+    plot_fig2_scratch_vs_transfer(transfer_results, OUTPUT_DIR)
