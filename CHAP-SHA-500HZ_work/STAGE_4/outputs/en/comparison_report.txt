@@ -1,0 +1,31 @@
+==============================================================================
+COMPARISON TABLE - BLOCK 1 (PTB-XL) vs BLOCK 2 (Chapman-Shaoxing)
+==============================================================================
+
+--- Block 1: PTB-XL (multi-label, BCEWithLogitsLoss) ---
+Model             AUC macro  F1 macro  F1_NORM    F1_MI  F1_STTC    F1_CD   F1_HYP
+----------------------------------------------------------------------------------
+CNN1D_ResNet         0.9185    0.7129   0.8774   0.7153   0.7718   0.7509   0.4492
+CNN_LSTM             0.9141    0.6977   0.8784   0.7226   0.7359   0.7507   0.4010
+ECGTransformer       0.8956    0.6643   0.8622   0.6135   0.7284   0.7151   0.4022
+
+--- Block 2: Chapman-Shaoxing 500 Hz, 9s window (multiclass, CrossEntropyLoss) ---
+Model              Accuracy  F1 macro  F1_AFIB  F1_GSVT    F1_SB    F1_SR
+-------------------------------------------------------------------------
+CNN1D_ResNet         0.9556    0.9512   0.9438   0.9285   0.9796   0.9530
+CNN_LSTM             0.9561    0.9525   0.9489   0.9380   0.9752   0.9479
+ECGTransformer       0.9386    0.9341   0.9376   0.9214   0.9619   0.9156
+
+--- Summary: F1 macro and ranking in each dataset ---
+Model             F1 PTB-XL  Rank   F1 Chapman  Rank
+----------------------------------------------------
+CNN1D_ResNet         0.7129     1       0.9512     2
+CNN_LSTM             0.6977     2       0.9525     1
+ECGTransformer       0.6643     3       0.9341     3
+
+Note: AUC-ROC macro only exists in Block 1 (multi-label task);
+Accuracy only exists in Block 2 (multiclass task). The only
+metric comparable across both blocks is F1 macro.
+Chapman-Shaoxing uses 9s windows (1s trimmed post-filter due to
+the filter's edge transient — see STAGE_1_2).
+==============================================================================

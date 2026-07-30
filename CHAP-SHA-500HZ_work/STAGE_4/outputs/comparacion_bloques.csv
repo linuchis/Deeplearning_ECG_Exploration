@@ -1,0 +1,7 @@
+dataset,model,auc_macro_or_accuracy,f1_macro,f1_class_1,f1_class_2,f1_class_3,f1_class_4,f1_class_5
+PTB-XL,CNN1D_ResNet,0.9185,0.7129,0.8774,0.7153,0.7718,0.7509,0.4492
+PTB-XL,CNN_LSTM,0.9141,0.6977,0.8784,0.7226,0.7359,0.7507,0.401
+PTB-XL,ECGTransformer,0.8956,0.6643,0.8622,0.6135,0.7284,0.7151,0.4022
+Chapman-Shaoxing,CNN1D_ResNet,0.9556,0.9512,0.9438,0.9285,0.9796,0.953,
+Chapman-Shaoxing,CNN_LSTM,0.9561,0.9525,0.9489,0.938,0.9752,0.9479,
+Chapman-Shaoxing,ECGTransformer,0.9386,0.9341,0.9376,0.9214,0.9619,0.9156,

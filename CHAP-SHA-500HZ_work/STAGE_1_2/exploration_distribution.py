@@ -6,9 +6,30 @@
 # Decisiones metodológicas documentadas:
 #   · 500 Hz nativos — sin resampleo (Zheng 2020, BimodalCNN)
 #   · Filtro Butterworth paso-banda 0.5–40 Hz bidireccional
+#   · Recorte del primer 1s POST-FILTRO (ver "TRANSITORIO DE BORDE" abajo)
 #   · Normalización Z-score por derivación + clip ±4σ (PatchECG; ver Etapa 2)
 #   · División estratificada 70/10/20 con semilla fija (reproducible)
 #   · CrossEntropyLoss + softmax — tarea multiclase (1 ritmo por paciente)
+#
+# TRANSITORIO DE BORDE DEL FILTRO (hallazgo documentado, no un bug):
+#   filtfilt es de fase cero (forward-backward), pero introduce un
+#   transitorio en los bordes cuando la muestra inicial del registro está
+#   lejos de la línea base — en Chapman-Shaoxing esto ocurre porque la
+#   ventana de 10s corta la grabación continua en un punto arbitrario del
+#   ciclo cardíaco (a veces a mitad de un QRS). Con corte 0.5 Hz (periodo
+#   2s), el transitorio tarda ~1.0–1.4s en asentarse. Se verificó que NO es
+#   sistemático (probado en 6 registros: solo el usado para ilustrar el
+#   pipeline, elegido por ser df.iloc[0], mostraba el efecto con fuerza) y
+#   que el filtfilt con método de Gustafsson (sin padding) no lo evita —
+#   el transitorio refleja contenido real de la señal, no un artefacto de
+#   padding numérico.
+#   Práctica documentada en la literatura: Advancements in Continuous
+#   Glucose Monitoring... (arXiv:2403.07296, §II-B) descarta los primeros
+#   y últimos 2s de cada registro antes de filtrar, por artefactos de
+#   colocación/retiro de electrodos. Aquí Chapman-Shaoxing no tiene buffer
+#   extra (exactos 10s por archivo) y el final del registro se verificó
+#   limpio, así que se recorta solo el 1s inicial —ventana final de 9s
+#   (4500 muestras)— en vez de 2s+2s.
 #
 # Ajuste de prestaciones (mismo criterio que PTBXL_work, STAGE_3):
 #   · Máquina: Ryzen 5 5600X (6 núcleos / 12 hilos) + RTX 5050 8 GB VRAM
@@ -27,8 +48,11 @@
 # =============================================================================
 
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")   # cada figura se genera 2 veces (es/en) en lote, sin ventana interactiva
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy.signal import butter, filtfilt
@@ -89,13 +113,21 @@ CLASS_NAMES  = ["AFIB", "GSVT", "SB", "SR"]
 CLASS_TO_IDX = {c: i for i, c in enumerate(CLASS_NAMES)}
 LEAD_NAMES   = ["I","II","III","aVR","aVL","aVF","V1","V2","V3","V4","V5","V6"]
 
-# Colores por clase (usados en todas las figuras)
+# Colores por clase (usados en todas las figuras). Paleta fija del
+# proyecto (no generica), validada con el validador de paletas
+# categoricas (banda de luminosidad, piso de croma, separacion bajo
+# daltonismo protan/deutan, piso de vision normal) — mismos 4 primeros
+# slots que PTBXL_work, para consistencia visual entre bloques.
 CLASS_COLORS = {
-    "AFIB": "#E63946",
-    "GSVT": "#F4A261",
-    "SB":   "#2A9D8F",
-    "SR":   "#457B9D",
+    "AFIB": "darkorchid",
+    "GSVT": "seagreen",
+    "SB":   "royalblue",
+    "SR":   "darkorange",
 }
+
+OUTPUT_DIR    = Path(__file__).resolve().parent / "outputs"
+OUTPUT_DIR_ES = OUTPUT_DIR / "es"
+OUTPUT_DIR_EN = OUTPUT_DIR / "en"
 
 
 # =============================================================================
@@ -135,8 +167,41 @@ def load_diagnostics(path: str) -> pd.DataFrame:
 # 2. ETAPA 1 — EXPLORACIÓN
 # =============================================================================
 
-def explorar_dataset(df: pd.DataFrame, ecg_dir: str):
+TEXTS = {
+    "es": {
+        "dist_title": "Distribución de clases — Chapman-Shaoxing (agrupación jerárquica, Zheng 2020)",
+        "dist_ylabel": "Número de registros",
+        "lead_xlabel": "Tiempo (s)",
+        "lead_ylabel": "Amplitud",
+        "not_found": "Archivo no encontrado",
+        "suptitle": "Chapman-Shaoxing · Exploración inicial · Lead II · 500 Hz",
+        "raw_title": "Lead II — Señal original  |  {fname}  |  Clase: {label}",
+        "raw_ylabel": "Amplitud (unidades raw)",
+        "proc_title": "Lead II — Señal preprocesada (9 s)  (Butterworth 0.5–40 Hz + recorte de 1 s + Z-score por derivación, clip ±4σ)",
+        "proc_ylabel": "Amplitud (Z-score)",
+        "trim_label": "1 s descartado\n(transitorio de borde del filtro)",
+        "xlabel": "Tiempo (s) — referido al registro original de 10 s",
+    },
+    "en": {
+        "dist_title": "Class distribution — Chapman-Shaoxing (hierarchical grouping, Zheng 2020)",
+        "dist_ylabel": "Number of records",
+        "lead_xlabel": "Time (s)",
+        "lead_ylabel": "Amplitude",
+        "not_found": "File not found",
+        "suptitle": "Chapman-Shaoxing · Initial exploration · Lead II · 500 Hz",
+        "raw_title": "Lead II — Original signal  |  {fname}  |  Class: {label}",
+        "raw_ylabel": "Amplitude (raw units)",
+        "proc_title": "Lead II — Preprocessed signal (9 s)  (Butterworth 0.5–40 Hz + 1 s trim + per-lead Z-score, clip ±4σ)",
+        "proc_ylabel": "Amplitude (Z-score)",
+        "trim_label": "1 s discarded\n(filter edge transient)",
+        "xlabel": "Time (s) — referenced to the original 10 s recording",
+    },
+}
+
+
+def explorar_dataset(df: pd.DataFrame, ecg_dir: str, lang: str = "es", out_dir: Path = None):
     """Estadísticas y figura de exploración inicial."""
+    t_ = TEXTS[lang]
 
     print("\n" + "="*60)
     print("  ETAPA 1 — EXPLORACIÓN CHAPMAN-SHAOXING")
@@ -186,10 +251,8 @@ def explorar_dataset(df: pd.DataFrame, ecg_dir: str):
     colors  = [CLASS_COLORS[c] for c in CLASS_NAMES]
     bars    = ax_dist.bar(CLASS_NAMES, dist.values, color=colors,
                           edgecolor="white", linewidth=0.8)
-    ax_dist.set_title(
-        "Distribución de clases — Chapman-Shaoxing (agrupación jerárquica, Zheng 2020)",
-        fontsize=13, fontweight="bold")
-    ax_dist.set_ylabel("Número de registros")
+    ax_dist.set_title(t_["dist_title"], fontsize=13, fontweight="bold")
+    ax_dist.set_ylabel(t_["dist_ylabel"])
     for bar, val in zip(bars, dist.values):
         ax_dist.text(bar.get_x() + bar.get_width()/2,
                      bar.get_height() + 30,
@@ -208,20 +271,20 @@ def explorar_dataset(df: pd.DataFrame, ecg_dir: str):
             ax.plot(t, sig[:, 1], color=CLASS_COLORS[cls], linewidth=0.7)
             ax.set_title(cls, fontsize=11, fontweight="bold",
                          color=CLASS_COLORS[cls])
-            ax.set_xlabel("Tiempo (s)", fontsize=9)
-            ax.set_ylabel("Amplitud", fontsize=9)
+            ax.set_xlabel(t_["lead_xlabel"], fontsize=9)
+            ax.set_ylabel(t_["lead_ylabel"], fontsize=9)
         else:
-            ax.text(0.5, 0.5, "Archivo no encontrado",
+            ax.text(0.5, 0.5, t_["not_found"],
                     ha="center", va="center", transform=ax.transAxes)
             ax.set_title(cls)
         ax.spines[["top","right"]].set_visible(False)
 
-    plt.suptitle(
-        f"Chapman-Shaoxing · Exploración inicial · Lead II · 500 Hz",
-        fontsize=13, y=1.01)
-    out = "bloque2_etapa1_exploracion.png"
+    plt.suptitle(t_["suptitle"], fontsize=13, y=1.01)
+    out_dir = out_dir or OUTPUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "bloque2_etapa1_exploracion.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
-    plt.show()
+    plt.close(fig)
     print(f"\n[OK] Figura guardada: {out}")
 
     return dist
@@ -232,7 +295,10 @@ def explorar_dataset(df: pd.DataFrame, ecg_dir: str):
 # =============================================================================
 # Pipeline definitivo (decisiones documentadas en cabecera del script):
 #   1. Filtro Butterworth paso-banda 0.5–40 Hz (bidireccional, sin desfase)
-#   2. Z-score POR DERIVACIÓN + clip ±4σ
+#   2. Recorte del primer 1s (500 muestras) POST-FILTRO — ver
+#      "TRANSITORIO DE BORDE DEL FILTRO" en la cabecera del script
+#   3. Z-score POR DERIVACIÓN + clip ±4σ (sobre la señal ya recortada, para
+#      que el transitorio descartado no sesgue la media/std de cada lead)
 #
 # Por qué por derivación y no global (bug encontrado en Etapa 3):
 #   Un Z-score calculado sobre las 60.000 muestras del registro completo
@@ -257,6 +323,14 @@ def explorar_dataset(df: pd.DataFrame, ecg_dir: str):
 
 ZSCORE_CLIP_SIGMA = 4.0   # ver justificación arriba (PatchECG, per-lead)
 
+# Recorte del transitorio de borde del filtro (ver cabecera del script,
+# "TRANSITORIO DE BORDE DEL FILTRO"): se descarta 1s (500 muestras a
+# 500 Hz) del INICIO de la señal ya filtrada. Ventana final: 9s = 4500
+# muestras. TRIM_START_SAMPLES se resta ANTES del z-score para que la
+# media/std por derivación no queden sesgadas por el transitorio.
+TRIM_START_SAMPLES = 500                          # 1 s a 500 Hz
+TRIMMED_SIGNAL_LEN = SIGNAL_LEN - TRIM_START_SAMPLES  # 4500 muestras = 9 s
+
 
 def butter_bandpass(lowcut=0.5, highcut=40.0, fs=FS, order=4):
     nyq  = fs / 2.0
@@ -268,16 +342,23 @@ def preprocess_signal(signal: np.ndarray) -> np.ndarray:
     """
     Preprocesa una señal (5000, 12):
       1. Butterworth 0.5–40 Hz  bidireccional por derivación
-      2. Z-score POR DERIVACIÓN (media/std propias de cada una de las 12
-         columnas, no globales) + clip a ±4σ
+      2. Recorte del primer 1s (500 muestras) — transitorio de borde
+         del filtro (ver cabecera del script)
+      3. Z-score POR DERIVACIÓN (media/std propias de cada una de las 12
+         columnas, no globales, calculadas YA SOBRE LA SEÑAL RECORTADA)
+         + clip a ±4σ
 
-    Returns: array float32 (5000, 12) normalizado
+    Returns: array float32 (4500, 12) normalizado — ventana de 9s
     """
     b, a = butter_bandpass()
     sig_filt = np.zeros_like(signal, dtype=np.float64)
 
     for lead in range(signal.shape[1]):
         sig_filt[:, lead] = filtfilt(b, a, signal[:, lead].astype(np.float64))
+
+    # Recorte del transitorio de borde ANTES de calcular media/std, para
+    # que el z-score refleje la señal ya estable (ver TRIM_START_SAMPLES)
+    sig_filt = sig_filt[TRIM_START_SAMPLES:]
 
     # Z-score por derivación: cada columna con su propia media/std
     mu  = sig_filt.mean(axis=0, keepdims=True)   # (1, 12)
@@ -312,11 +393,20 @@ def verificar_calidad(signal: np.ndarray) -> bool:
     return True
 
 
-def visualizar_preprocesamiento(df: pd.DataFrame, ecg_dir: str):
+def visualizar_preprocesamiento(df: pd.DataFrame, ecg_dir: str, lang: str = "es",
+                                out_dir: Path = None):
     """
     Muestra Lead II de una señal antes y después del preprocesamiento,
     para verificar visualmente que el filtro y la normalización son correctos.
+
+    El panel superior (señal cruda) usa el eje de tiempo original 0-10s y
+    sombrea el 1er segundo descartado. El panel inferior (señal preprocesada,
+    9s = 4500 muestras) se grafica en el eje 1-10s, para que ambos paneles
+    queden alineados en el tiempo real del registro y sea evidente que el
+    tramo faltante es justamente el sombreado de arriba — ver
+    "TRANSITORIO DE BORDE DEL FILTRO" en la cabecera del script.
     """
+    t_ = TEXTS[lang]
     row   = df.iloc[0]
     fpath = os.path.join(ecg_dir, str(row["FileName"]) + ".csv")
     if not os.path.exists(fpath):
@@ -324,32 +414,39 @@ def visualizar_preprocesamiento(df: pd.DataFrame, ecg_dir: str):
         return
 
     sig_raw  = pd.read_csv(fpath, header=None).values.astype(np.float32)
-    sig_proc = preprocess_signal(sig_raw)
-    t        = np.arange(SIGNAL_LEN) / FS
+    sig_proc = preprocess_signal(sig_raw)                    # (4500, 12)
+    t_raw    = np.arange(SIGNAL_LEN) / FS                     # 0..10s
+    t_proc   = np.arange(TRIM_START_SAMPLES, SIGNAL_LEN) / FS  # 1..10s
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 6), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(14, 6.5), sharex=True)
 
-    axes[0].plot(t, sig_raw[:, 1], color="#6C757D", linewidth=0.7)
+    axes[0].plot(t_raw, sig_raw[:, 1], color="#6C757D", linewidth=0.7)
+    axes[0].axvspan(0, TRIM_START_SAMPLES / FS, color="#B22222", alpha=0.12, zorder=0)
+    axes[0].axvline(TRIM_START_SAMPLES / FS, color="#B22222", linewidth=1.0,
+                    linestyle="--", alpha=0.6)
+    axes[0].text(TRIM_START_SAMPLES / FS / 2, axes[0].get_ylim()[1] * 0.9,
+                t_["trim_label"], ha="center", va="top", fontsize=8, color="#B22222")
     axes[0].set_title(
-        f"Lead II — Señal original  |  {row['FileName']}  |  Clase: {row['Label']}",
+        t_["raw_title"].format(fname=row["FileName"], label=row["Label"]),
         fontsize=11)
-    axes[0].set_ylabel("Amplitud (unidades raw)")
+    axes[0].set_ylabel(t_["raw_ylabel"])
     axes[0].spines[["top","right"]].set_visible(False)
 
-    axes[1].plot(t, sig_proc[:, 1],
+    axes[1].plot(t_proc, sig_proc[:, 1],
                  color=CLASS_COLORS.get(row["Label"], "#333"), linewidth=0.7)
-    axes[1].set_title(
-        "Lead II — Señal preprocesada  "
-        "(Butterworth 0.5–40 Hz + Z-score por derivación, clip ±4σ)",
-        fontsize=11)
-    axes[1].set_xlabel("Tiempo (s)")
-    axes[1].set_ylabel("Amplitud (Z-score)")
+    axes[1].axvspan(0, TRIM_START_SAMPLES / FS, color="#B22222", alpha=0.06, zorder=0)
+    axes[1].set_title(t_["proc_title"], fontsize=11)
+    axes[1].set_xlabel(t_["xlabel"])
+    axes[1].set_ylabel(t_["proc_ylabel"])
+    axes[1].set_xlim(0, SIGNAL_LEN / FS)
     axes[1].spines[["top","right"]].set_visible(False)
 
     plt.tight_layout()
-    out = "bloque2_etapa2_preprocesamiento.png"
+    out_dir = out_dir or OUTPUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "bloque2_etapa2_preprocesamiento.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
-    plt.show()
+    plt.close(fig)
     print(f"[OK] Figura guardada: {out}")
 
 
@@ -551,9 +648,14 @@ if __name__ == "__main__":
     print("="*60)
     print(f"  ECG dir  : {ECG_DIR}")
     print(f"  Fs       : {FS} Hz (nativo, sin resampleo)")
-    print(f"  Señal    : {SIGNAL_LEN} muestras × {N_LEADS} derivaciones")
+    print(f"  Señal    : {SIGNAL_LEN} muestras crudas -> recorte de "
+          f"{TRIM_START_SAMPLES} (transitorio de borde) -> "
+          f"{TRIMMED_SIGNAL_LEN} muestras × {N_LEADS} derivaciones (9 s)")
     print(f"  Norma    : Z-score por derivación + clip ±{ZSCORE_CLIP_SIGMA}σ")
     print(f"  Pérdida  : CrossEntropyLoss con pesos de clase")
+
+    OUTPUT_DIR_ES.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR_EN.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # 8.1  Metadatos
@@ -561,14 +663,16 @@ if __name__ == "__main__":
     df = load_diagnostics(DIAGNOSTICS_PATH)
 
     # ------------------------------------------------------------------
-    # 8.2  Etapa 1: Exploración
+    # 8.2  Etapa 1: Exploración (figuras ES/EN)
     # ------------------------------------------------------------------
-    dist = explorar_dataset(df, ECG_DIR)
+    dist = explorar_dataset(df, ECG_DIR, lang="es", out_dir=OUTPUT_DIR_ES)
+    explorar_dataset(df, ECG_DIR, lang="en", out_dir=OUTPUT_DIR_EN)
 
     # ------------------------------------------------------------------
-    # 8.3  Verificación visual del preprocesamiento
+    # 8.3  Verificación visual del preprocesamiento (figuras ES/EN)
     # ------------------------------------------------------------------
-    visualizar_preprocesamiento(df, ECG_DIR)
+    visualizar_preprocesamiento(df, ECG_DIR, lang="es", out_dir=OUTPUT_DIR_ES)
+    visualizar_preprocesamiento(df, ECG_DIR, lang="en", out_dir=OUTPUT_DIR_EN)
 
     # ------------------------------------------------------------------
     # 8.4  Etapa 2: Preprocesamiento completo
@@ -591,10 +695,12 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # 8.6  Guardar
     # ------------------------------------------------------------------
-    OUTPUT_DIR = os.path.join(BASE_DIR, "preprocessed")
-    guardar_splits(splits, output_dir=OUTPUT_DIR)
+    PREPROCESSED_OUTPUT_DIR = os.path.join(BASE_DIR, "preprocessed")
+    guardar_splits(splits, output_dir=PREPROCESSED_OUTPUT_DIR)
 
     print("\n✓ Etapas 1 y 2 del Bloque 2 completadas.")
+    print(f"  Graficos + resumen ES en: {OUTPUT_DIR_ES}")
+    print(f"  Graficos + resumen EN en: {OUTPUT_DIR_EN}")
     print("  Siguiente → Etapa 3: CNN1D / CNN-LSTM / Transformer sobre Chapman 500 Hz")
     print(f"  Clases    : {CLASS_NAMES}")
     print(f"  Función de pérdida: CrossEntropyLoss (multiclase, softmax)")

@@ -5,14 +5,18 @@ ETAPA 3 — TRES ARQUITECTURAS DE DEEP LEARNING
 =======================================================================
 Modelos      : CNN1D_ResNet | CNN_LSTM | Transformer
 Tarea        : Clasificación multiclase (AFIB | GSVT | SB | SR)
-Entrada      : (batch, 12, 5000)  — 12 derivaciones × 5000 muestras
+Entrada      : (batch, 12, 4500)  — 12 derivaciones × 4500 muestras (9 s)
+               (10 s nativos menos 1 s recortado en STAGE_1_2 por el
+               transitorio de borde del filtro — ver cabecera de
+               STAGE_1_2/exploration_distribution.py)
 Salida       : (batch, 4)         — logits (para CrossEntropyLoss)
 
 Diferencias respecto al Bloque 1 (PTB-XL):
   · Tarea multiclase (1 ritmo por paciente) → CrossEntropyLoss + softmax
     En PTB-XL era multi-label → BCEWithLogitsLoss + sigmoid
   · 4 clases en lugar de 5 superclases
-  · Entrada de 5000 muestras en lugar de 1000 (500 Hz vs 100 Hz)
+  · Entrada de 4500 muestras en lugar de 1000 (500 Hz vs 100 Hz, y con
+    el recorte de 1s de STAGE_1_2 aplicado)
     → Los bloques de pooling comprimen más agresivamente la secuencia
   · Pesos de clase cargados desde shaoxing_class_weights.npy
     (mismo concepto que pos_weights en Bloque 1, distinta forma de cálculo)
@@ -49,6 +53,7 @@ from sklearn.metrics import (accuracy_score, f1_score,
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import seaborn as sns
 
 # =======================================================================
@@ -63,7 +68,51 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 CLASS_NAMES = ["AFIB", "GSVT", "SB", "SR"]
 N_CLASSES   = 4
 N_LEADS     = 12
-SIGNAL_LEN  = 5000   # muestras a 500 Hz
+# 9 s (4500 muestras a 500 Hz): tras STAGE_1_2 se recorta 1s post-filtro
+# (transitorio de borde de filtfilt, ver cabecera de
+# STAGE_1_2/exploration_distribution.py) — antes eran 5000 muestras (10s).
+SIGNAL_LEN  = 4500
+
+# ── Paleta fija del proyecto (no generica), consistente con PTBXL_work: ──
+# mismo color de arquitectura en TODOS los bloques del proyecto.
+PALETTE = ["darkorchid", "seagreen", "royalblue", "darkorange", "firebrick"]
+MODEL_COLORS = {
+    "CNN1D_ResNet":   PALETTE[0],
+    "CNN_LSTM":       PALETTE[1],
+    "ECGTransformer": PALETTE[2],
+}
+# Colormap secuencial para matrices de confusion (blanco -> royalblue),
+# igual que en PTBXL_work, en vez de "Blues" generico.
+CM_CMAP = LinearSegmentedColormap.from_list("chapman_cm", ["#ffffff", "royalblue"])
+
+TEXTS = {
+    "es": {
+        "loss_title": "Pérdida (CrossEntropyLoss)",
+        "epoch": "Época", "loss_ylabel": "Loss", "train": "train", "val": "val",
+        "metrics_title": "Métricas de validación", "score_ylabel": "Score",
+        "acc_label": "Accuracy (val)", "f1_label": "F1 macro (val)",
+        "curves_suptitle": "{model} — curvas de entrenamiento (Chapman 500 Hz, ventana 9 s)",
+        "cm_title": "Matriz de confusión — {model} (test)",
+        "predicted": "Predicho", "actual": "Real",
+    },
+    "en": {
+        "loss_title": "Loss (CrossEntropyLoss)",
+        "epoch": "Epoch", "loss_ylabel": "Loss", "train": "train", "val": "val",
+        "metrics_title": "Validation metrics", "score_ylabel": "Score",
+        "acc_label": "Accuracy (val)", "f1_label": "F1 macro (val)",
+        "curves_suptitle": "{model} — training curves (Chapman 500 Hz, 9 s window)",
+        "cm_title": "Confusion matrix — {model} (test)",
+        "predicted": "Predicted", "actual": "Actual",
+    },
+}
+
+
+def model_dir(name: str) -> Path:
+    return OUTPUT_DIR / name
+
+
+def model_lang_dir(name: str, lang: str) -> Path:
+    return OUTPUT_DIR / name / lang
 
 
 # =======================================================================
@@ -322,9 +371,9 @@ class ECGTransformer(nn.Module):
     pero aquí son patches 1D de señal ECG.
 
     Flujo:
-      (batch, 12, 5000)
-        → CNN stem: reduce a (batch, 128, 156) y extrae features locales
-        → Patchify: cada posición temporal es un token → (batch, 156, 128)
+      (batch, 12, signal_len)
+        → CNN stem: reduce a (batch, d_model, seq_len) y extrae features locales
+        → Patchify: cada posición temporal es un token → (batch, seq_len, d_model)
         → Positional encoding: inyecta posición en la secuencia
         → N capas Transformer Encoder (self-attention + FFN)
         → CLS token o GlobalAvgPool → (batch, d_model)
@@ -335,10 +384,10 @@ class ECGTransformer(nn.Module):
     """
     def __init__(self, n_leads=12, n_classes=N_CLASSES,
                  d_model=128, n_heads=8, n_layers=4,
-                 dim_ff=256, dropout=0.1):
+                 dim_ff=256, dropout=0.1, signal_len=SIGNAL_LEN):
         super().__init__()
 
-        # ── CNN stem (igual que en CNN_LSTM: reduce 5000→156) ─────────
+        # ── CNN stem (igual que en CNN_LSTM) ───────────────────────────
         self.cnn_stem = nn.Sequential(
             nn.Conv1d(n_leads, 64, kernel_size=15, padding=7, bias=False),
             nn.BatchNorm1d(64),
@@ -355,8 +404,13 @@ class ECGTransformer(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool1d(2, stride=2),
         )
-        # Salida stem: (batch, d_model=128, 156)
-        # Longitud de secuencia para el Transformer: seq_len = 156
+        # Longitud de secuencia de salida del stem: se calcula con un
+        # forward "en seco" en vez de hardcodearla (era 156 fijo asumiendo
+        # 5000 muestras de entrada; con la ventana de 9s/4500 muestras de
+        # STAGE_1_2 el valor cambia a 140 — calcularlo evita un mismatch
+        # de forma silencioso si SIGNAL_LEN vuelve a cambiar).
+        with torch.no_grad():
+            seq_len = self.cnn_stem(torch.zeros(1, n_leads, signal_len)).shape[-1]
 
         # ── CLS token ─────────────────────────────────────────────────
         # Token de clasificación aprendible (como en BERT/ViT)
@@ -364,7 +418,7 @@ class ECGTransformer(nn.Module):
 
         # ── Positional encoding (aprendible) ──────────────────────────
         # +1 para el CLS token
-        self.pos_embedding = nn.Parameter(torch.zeros(1, 157, d_model))
+        self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len + 1, d_model))
 
         # ── Transformer Encoder ───────────────────────────────────────
         encoder_layer = nn.TransformerEncoderLayer(
@@ -397,21 +451,21 @@ class ECGTransformer(nn.Module):
         nn.init.trunc_normal_(self.pos_embedding, std=0.02)
 
     def forward(self, x):
-        # x: (batch, 12, 5000)
+        # x: (batch, 12, signal_len)
         B = x.size(0)
 
-        x = self.cnn_stem(x)              # (B, 128, 156)
-        x = x.permute(0, 2, 1)           # (B, 156, 128)
+        x = self.cnn_stem(x)              # (B, d_model, seq_len)
+        x = x.permute(0, 2, 1)           # (B, seq_len, d_model)
 
         # Añadir CLS token al inicio de la secuencia
-        cls = self.cls_token.expand(B, -1, -1)  # (B, 1, 128)
-        x = torch.cat([cls, x], dim=1)           # (B, 157, 128)
+        cls = self.cls_token.expand(B, -1, -1)  # (B, 1, d_model)
+        x = torch.cat([cls, x], dim=1)           # (B, seq_len+1, d_model)
 
         # Positional encoding
         x = self.dropout(x + self.pos_embedding)
 
         # Transformer encoder
-        x = self.transformer(x)           # (B, 157, 128)
+        x = self.transformer(x)           # (B, seq_len+1, d_model)
 
         # Usar el CLS token para clasificar
         cls_out = x[:, 0]                 # (B, 128)
@@ -525,8 +579,8 @@ def train_model(model_name:    str,
     En PTB-XL era AUC macro (multi-label). El cambio es coherente
     con el tipo de tarea.
     """
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = OUTPUT_DIR / f"best_{model_name}.pt"
+    model_dir(model_name).mkdir(parents=True, exist_ok=True)
+    checkpoint_path = model_dir(model_name) / f"best_{model_name}.pt"
 
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model     = model.to(device)
@@ -610,7 +664,7 @@ def evaluate_on_test(model_name:    str,
                      class_weights: torch.Tensor) -> dict:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model  = model_class(**model_kwargs).to(device)
-    ckpt   = torch.load(OUTPUT_DIR / f"best_{model_name}.pt",
+    ckpt   = torch.load(model_dir(model_name) / f"best_{model_name}.pt",
                         map_location=device)
     model.load_state_dict(ckpt["model_state"])
 
@@ -646,52 +700,54 @@ def save_history_csv(history: dict, path: Path):
             writer.writerow([i + 1] + [history[k][i] for k in keys])
 
 
-def plot_training_curves(model_name: str, history: dict):
+def plot_training_curves(model_name: str, history: dict, lang: str, out_dir: Path):
+    t_ = TEXTS[lang]
     epochs = range(1, len(history["train_loss"]) + 1)
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
-    axes[0].plot(epochs, history["train_loss"], label="train")
-    axes[0].plot(epochs, history["val_loss"],   label="val")
-    axes[0].set_title("Pérdida (CrossEntropyLoss)")
-    axes[0].set_xlabel("Época"); axes[0].set_ylabel("Loss")
+    axes[0].plot(epochs, history["train_loss"], label=t_["train"], color=PALETTE[0])
+    axes[0].plot(epochs, history["val_loss"],   label=t_["val"],   color=PALETTE[1])
+    axes[0].set_title(t_["loss_title"])
+    axes[0].set_xlabel(t_["epoch"]); axes[0].set_ylabel(t_["loss_ylabel"])
     axes[0].legend()
 
-    axes[1].plot(epochs, history["val_acc"], label="Accuracy (val)",
-                 color="tab:blue")
-    axes[1].plot(epochs, history["val_f1"],  label="F1 macro (val)",
-                 color="tab:orange")
-    axes[1].set_title("Métricas de validación")
-    axes[1].set_xlabel("Época"); axes[1].set_ylabel("Score")
+    axes[1].plot(epochs, history["val_acc"], label=t_["acc_label"], color=PALETTE[3])
+    axes[1].plot(epochs, history["val_f1"],  label=t_["f1_label"],  color=PALETTE[4])
+    axes[1].set_title(t_["metrics_title"])
+    axes[1].set_xlabel(t_["epoch"]); axes[1].set_ylabel(t_["score_ylabel"])
     axes[1].set_ylim(0, 1); axes[1].legend()
 
-    fig.suptitle(f"{model_name} — curvas de entrenamiento (Chapman 500 Hz)")
+    fig.suptitle(t_["curves_suptitle"].format(model=model_name))
     fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / f"{model_name}_curves.png", dpi=150)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / "training_curves.png", dpi=150)
     plt.close(fig)
 
 
-def plot_confusion_matrix(model_name: str, test_metrics: dict):
+def plot_confusion_matrix(model_name: str, test_metrics: dict, lang: str, out_dir: Path):
+    t_ = TEXTS[lang]
     cm = np.array(test_metrics["confusion_matrix"])
     fig, ax = plt.subplots(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+    sns.heatmap(cm, annot=True, fmt="d", cmap=CM_CMAP,
                 xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax)
-    ax.set_xlabel("Predicho"); ax.set_ylabel("Real")
-    ax.set_title(f"Matriz de confusión — {model_name} (test)")
+    ax.set_xlabel(t_["predicted"]); ax.set_ylabel(t_["actual"])
+    ax.set_title(t_["cm_title"].format(model=model_name))
     fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / f"{model_name}_confusion.png", dpi=150)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / "confusion_matrix.png", dpi=150)
     plt.close(fig)
 
 
-def save_test_report(model_name: str, test_metrics: dict):
+def save_test_report(model_name: str, test_metrics: dict,
+                     json_path: Path, txt_path_es: Path, txt_path_en: Path):
     numeric = {k: v for k, v in test_metrics.items()
                if k not in ("classification_report", "confusion_matrix")}
-    with open(OUTPUT_DIR / f"{model_name}_test_metrics.json",
-              "w", encoding="utf-8") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(numeric, f, indent=2)
 
-    lines = [
+    lines_es = [
         "=" * 60,
-        f"RESULTADOS TEST — {model_name} (Chapman-Shaoxing 500 Hz)",
+        f"RESULTADOS TEST — {model_name} (Chapman-Shaoxing 500 Hz, ventana 9 s)",
         "=" * 60,
         f"Loss      : {test_metrics['loss']:.4f}",
         f"Accuracy  : {test_metrics['accuracy']:.4f}",
@@ -705,8 +761,25 @@ def save_test_report(model_name: str, test_metrics: dict):
         test_metrics["classification_report"],
         "=" * 60,
     ]
-    (OUTPUT_DIR / f"{model_name}_test_metrics.txt").write_text(
-        "\n".join(lines), encoding="utf-8")
+    txt_path_es.write_text("\n".join(lines_es), encoding="utf-8")
+
+    lines_en = [
+        "=" * 60,
+        f"TEST RESULTS — {model_name} (Chapman-Shaoxing 500 Hz, 9 s window)",
+        "=" * 60,
+        f"Loss      : {test_metrics['loss']:.4f}",
+        f"Accuracy  : {test_metrics['accuracy']:.4f}",
+        f"F1 macro  : {test_metrics['f1_macro']:.4f}",
+        f"F1 wt     : {test_metrics['f1_weighted']:.4f}",
+        "",
+        "F1 per class:",
+    ] + [f"  {c:<6}: {test_metrics[f'f1_{c}']:.4f}" for c in CLASS_NAMES] + [
+        "",
+        "Classification report (threshold=argmax):",
+        test_metrics["classification_report"],
+        "=" * 60,
+    ]
+    txt_path_en.write_text("\n".join(lines_en), encoding="utf-8")
 
 
 # =======================================================================
@@ -748,11 +821,19 @@ if __name__ == "__main__":
     all_test_results = {}
 
     for cfg in MODELOS:
+        name = cfg["name"]
         model = cfg["class"](**cfg["kwargs"])
+
+        mdir    = model_dir(name)
+        es_dir  = model_lang_dir(name, "es")
+        en_dir  = model_lang_dir(name, "en")
+        mdir.mkdir(parents=True, exist_ok=True)
+        es_dir.mkdir(parents=True, exist_ok=True)
+        en_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Entrenamiento ─────────────────────────────────────────────
         _, history, ckpt_path = train_model(
-            model_name=cfg["name"],
+            model_name=name,
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
@@ -761,24 +842,30 @@ if __name__ == "__main__":
             lr=1e-3,
         )
 
-        # ── Guardar historial y curvas ────────────────────────────────
-        save_history_csv(history,
-                         OUTPUT_DIR / f"{cfg['name']}_history.csv")
-        plot_training_curves(cfg["name"], history)
+        # ── Guardar historial y curvas (curvas: es/en) ─────────────────
+        save_history_csv(history, mdir / "history.csv")
+        plot_training_curves(name, history, lang="es", out_dir=es_dir)
+        plot_training_curves(name, history, lang="en", out_dir=en_dir)
 
         # ── Evaluación en test ────────────────────────────────────────
         test_metrics = evaluate_on_test(
-            model_name=cfg["name"],
+            model_name=name,
             model_class=cfg["class"],
             model_kwargs=cfg["kwargs"],
             test_loader=test_loader,
             class_weights=class_weights,
         )
 
-        # ── Guardar resultados ────────────────────────────────────────
-        save_test_report(cfg["name"], test_metrics)
-        plot_confusion_matrix(cfg["name"], test_metrics)
-        all_test_results[cfg["name"]] = test_metrics
+        # ── Guardar resultados (json neutral, txt/confusion: es/en) ────
+        save_test_report(
+            name, test_metrics,
+            json_path=mdir / "test_metrics.json",
+            txt_path_es=es_dir / "test_metrics.txt",
+            txt_path_en=en_dir / "test_metrics.txt",
+        )
+        plot_confusion_matrix(name, test_metrics, lang="es", out_dir=es_dir)
+        plot_confusion_matrix(name, test_metrics, lang="en", out_dir=en_dir)
+        all_test_results[name] = test_metrics
 
     # ── Tabla comparativa final ───────────────────────────────────────
     print(f"\n{'='*60}")
