@@ -49,6 +49,9 @@ def load_metadata(ptb_xl_path: str) -> pd.DataFrame:
     # Decodificar scp_codes de string a dict
     df["scp_codes"] = df["scp_codes"].apply(ast.literal_eval)
 
+    # Nota: las columnas "age" y "sex" se preservan tal cual en el DataFrame
+    # para uso posterior (información clínica opcional en PTBXLDataset)
+
     # Cargar tabla de códigos SCP para identificar superclases diagnósticas
     scp_path = os.path.join(ptb_xl_path, "scp_statements.csv")
     scp_df   = pd.read_csv(scp_path, index_col=0)
@@ -187,16 +190,19 @@ class PTBXLDataset(Dataset):
                  df: pd.DataFrame,
                  ptb_xl_path: str,
                  sampling_rate: int = 100,
-                 augment: bool = False):
+                 augment: bool = False,
+                 use_clinical: bool = False):
         """
         df           : subset del DataFrame (train / val / test)
         ptb_xl_path  : ruta raíz de PTB-XL
         augment      : si True, aplica augmentación ligera (solo en train)
+        use_clinical : si True, devuelve también un tensor con age y sex
         """
         self.df            = df.reset_index()
         self.ptb_xl_path   = ptb_xl_path
         self.sampling_rate = sampling_rate
         self.augment       = augment
+        self.use_clinical  = use_clinical
 
     def __len__(self) -> int:
         return len(self.df)
@@ -221,6 +227,13 @@ class PTBXLDataset(Dataset):
 
         label = np.array(row["label_vector"], dtype=np.float32)
         label_tensor = torch.tensor(label, dtype=torch.float32)      # (5,)
+
+        # Información clínica opcional: age (normalizada /100) y sex (0.0=Male, 1.0=Female)
+        if self.use_clinical:
+            age = np.float32(row["age"]) / 100.0
+            sex = np.float32(row["sex"])  # PTB-XL: 0=Male, 1=Female
+            clinical_tensor = torch.tensor([age, sex], dtype=torch.float32)  # (2,)
+            return signal_tensor, label_tensor, clinical_tensor
 
         return signal_tensor, label_tensor
 
@@ -249,7 +262,8 @@ class PTBXLDataset(Dataset):
 def build_dataloaders(ptb_xl_path: str,
                       batch_size: int   = 64,
                       num_workers: int  = 2,
-                      sampling_rate: int = 100):
+                      sampling_rate: int = 100,
+                      use_clinical: bool = False):
     """
     Carga metadata, divide por folds oficiales y devuelve tres DataLoaders.
 
@@ -287,9 +301,9 @@ def build_dataloaders(ptb_xl_path: str,
         print(f"  {cls:<6} : {w:.4f}")
 
     # ── Construir Datasets ────────────────────────────────────────────
-    train_ds = PTBXLDataset(df_train, ptb_xl_path, sampling_rate, augment=True)
-    val_ds   = PTBXLDataset(df_val,   ptb_xl_path, sampling_rate, augment=False)
-    test_ds  = PTBXLDataset(df_test,  ptb_xl_path, sampling_rate, augment=False)
+    train_ds = PTBXLDataset(df_train, ptb_xl_path, sampling_rate, augment=True,  use_clinical=use_clinical)
+    val_ds   = PTBXLDataset(df_val,   ptb_xl_path, sampling_rate, augment=False, use_clinical=use_clinical)
+    test_ds  = PTBXLDataset(df_test,  ptb_xl_path, sampling_rate, augment=False, use_clinical=use_clinical)
 
     # ── Construir DataLoaders ─────────────────────────────────────────
     train_loader = DataLoader(train_ds, batch_size=batch_size,
@@ -309,6 +323,8 @@ def build_dataloaders(ptb_xl_path: str,
     print("=" * 60)
     print("Pipeline listo. Tensores de entrada: (batch, 12, 1000)")
     print("Tensores de salida (label): (batch, 5)")
+    if use_clinical:
+        print("Clínico activo: cada batch devuelve un tercer tensor (batch, 2) [age, sex]")
     print("=" * 60)
 
     return train_loader, val_loader, test_loader, pos_weights
@@ -322,7 +338,12 @@ def sanity_check(train_loader, pos_weights):
     Corre esto antes de entrenar para detectar errores de configuración.
     """
     print("\n── Sanity check ──")
-    signals, labels = next(iter(train_loader))
+    batch = next(iter(train_loader))
+    if len(batch) == 3:
+        signals, labels, clinical = batch
+    else:
+        signals, labels = batch
+        clinical = None
 
     print(f"Shape señales : {signals.shape}")   # esperado: (64, 12, 1000)
     print(f"Shape labels  : {labels.shape}")    # esperado: (64, 5)
@@ -330,6 +351,10 @@ def sanity_check(train_loader, pos_weights):
     print(f"Dtype señal   : {signals.dtype}")
     print(f"Dtype label   : {labels.dtype}")
     print(f"Pos_weights   : {pos_weights.tolist()}")
+
+    if clinical is not None:
+        print(f"Shape clínico : {clinical.shape}")   # esperado: (64, 2)
+        print(f"Rango clínico : [{clinical.min():.3f}, {clinical.max():.3f}]")
 
     # Verificar que no hay NaN en el batch
     assert not torch.isnan(signals).any(), "¡NaN detectado en señales!"

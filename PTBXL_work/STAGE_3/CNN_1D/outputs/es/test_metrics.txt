@@ -1,29 +1,29 @@
 ============================================================
 RESULTADOS FINALES — TEST (fold 10)
 ============================================================
-Loss test : 0.5925
-AUC macro : 0.9185
-F1 macro  : 0.7129
+Loss test : 0.5623
+AUC macro : 0.9180
+F1 macro  : 0.7036
 
 F1 por clase:
-  NORM   : 0.8774
-  MI     : 0.7153
-  STTC   : 0.7718
-  CD     : 0.7509
-  HYP    : 0.4492
+  NORM   : 0.8791
+  MI     : 0.6977
+  STTC   : 0.7760
+  CD     : 0.7279
+  HYP    : 0.4371
 
 Reporte de clasificación (sklearn, umbral=0.5):
               precision    recall  f1-score   support
 
-        NORM       0.82      0.95      0.88       954
-          MI       0.68      0.76      0.72       415
-        STTC       0.70      0.86      0.77       506
-          CD       0.70      0.81      0.75       496
-         HYP       0.34      0.66      0.45       222
+        NORM       0.83      0.94      0.88       954
+          MI       0.59      0.85      0.70       415
+        STTC       0.75      0.80      0.78       506
+          CD       0.65      0.82      0.73       496
+         HYP       0.32      0.69      0.44       222
 
-   micro avg       0.69      0.85      0.76      2593
-   macro avg       0.65      0.80      0.71      2593
-weighted avg       0.71      0.85      0.77      2593
- samples avg       0.75      0.86      0.78      2593
+   micro avg       0.67      0.85      0.75      2593
+   macro avg       0.63      0.82      0.70      2593
+weighted avg       0.70      0.85      0.76      2593
+ samples avg       0.73      0.86      0.77      2593
 
 ============================================================

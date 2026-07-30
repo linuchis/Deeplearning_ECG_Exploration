@@ -369,8 +369,10 @@ class ECGTransformer(nn.Module):
       (batch, 21, 256)
         ↓  Extraer CLS token [posición 0]
       (batch, 256)
-        ↓  LayerNorm + clasificador FC
-      (batch, 5)            ← logits
+        ↓  encoder_norm (LayerNorm) + encoder_proj (Linear→GELU→Dropout)
+      (batch, proj_dim)     ← embedding latente (reutilizable, ver get_embeddings)
+        ↓  [opcional: concat variables clínicas] + head (Linear)
+      (batch, n_classes)    ← logits
 
     El token [CLS] (classification token):
       - Es un vector aprendible inicializado en ceros
@@ -394,15 +396,19 @@ class ECGTransformer(nn.Module):
     """
 
     def __init__(self,
-                 n_leads:    int   = 12,
-                 n_classes:  int   = 5,
-                 patch_size: int   = 50,
-                 d_model:    int   = 256,
-                 n_heads:    int   = 8,
-                 n_layers:   int   = 4,
-                 mlp_ratio:  int   = 4,
-                 dropout:    float = 0.1):
+                 n_leads:      int   = 12,
+                 n_classes:    int   = 5,
+                 patch_size:   int   = 50,
+                 d_model:      int   = 256,
+                 n_heads:      int   = 8,
+                 n_layers:     int   = 4,
+                 mlp_ratio:    int   = 4,
+                 dropout:      float = 0.1,
+                 proj_dim:     int   = 128,
+                 use_clinical: bool  = False):
         super().__init__()
+
+        self.use_clinical = use_clinical
 
         n_patches = 1000 // patch_size   # 20
 
@@ -430,14 +436,18 @@ class ECGTransformer(nn.Module):
             for _ in range(n_layers)
         ])
 
-        # Clasificador sobre el CLS token
-        self.norm       = nn.LayerNorm(d_model)
-        self.classifier = nn.Sequential(
-            nn.Linear(d_model, 128),
+        # Encoder: normalización del CLS token + proyección al espacio latente
+        # (proj_dim), reutilizable como embedding para transfer learning.
+        self.encoder_norm = nn.LayerNorm(d_model)
+        self.encoder_proj = nn.Sequential(
+            nn.Linear(d_model, proj_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(128, n_classes),
         )
+
+        # Cabeza de clasificación: opcionalmente concatena variables clínicas
+        # (p. ej. edad, sexo) al embedding antes de proyectar a n_classes.
+        self.head = nn.Linear(proj_dim + (2 if use_clinical else 0), n_classes)
 
         self._init_weights()
 
@@ -452,30 +462,34 @@ class ECGTransformer(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, clinical=None):
         """
-        x: (batch, 12, 1000)
-        retorna: (batch, 5) — logits
+        x        : (batch, 12, 1000)
+        clinical : (batch, 2) opcional — solo se usa si use_clinical=True
+        retorna  : (batch, n_classes) — logits
         """
         B = x.size(0)
+        x = self.patch_embed(x)
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)
+        x = self.pos_enc(x)
+        x = self.encoder(x)
+        cls_out = self.encoder_norm(x[:, 0, :])
+        z = self.encoder_proj(cls_out)
+        if self.use_clinical and clinical is not None:
+            z = torch.cat([z, clinical], dim=1)
+        return self.head(z)
 
-        # Patch embedding
-        x = self.patch_embed(x)         # (B, 20, 256)
-
-        # Prepend CLS token
-        cls = self.cls_token.expand(B, -1, -1)   # (B, 1, 256)
-        x   = torch.cat([cls, x], dim=1)          # (B, 21, 256)
-
-        # Codificación posicional
-        x = self.pos_enc(x)              # (B, 21, 256)
-
-        # N bloques encoder
-        x = self.encoder(x)              # (B, 21, 256)
-
-        # Extraer CLS token y clasificar
-        cls_out = self.norm(x[:, 0, :])  # (B, 256)
-        logits  = self.classifier(cls_out)  # (B, 5)
-        return logits
+    def get_embeddings(self, x):
+        """Devuelve el vector latente (batch, proj_dim) sin pasar por la cabeza."""
+        B = x.size(0)
+        x = self.patch_embed(x)
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)
+        x = self.pos_enc(x)
+        x = self.encoder(x)
+        cls_out = self.encoder_norm(x[:, 0, :])
+        return self.encoder_proj(cls_out)
 
 
 # ── MÉTRICAS ──────────────────────────────────────────────────────────
@@ -507,12 +521,21 @@ def compute_metrics(all_labels, all_probs, threshold=0.5):
 # ── ENTRENAMIENTO ─────────────────────────────────────────────────────
 
 def train_one_epoch(model, loader, optimizer, criterion, device, scheduler=None):
+    """Entrena una época. Cada batch del loader puede traer 2 elementos
+    (signals, labels) o 3 (signals, clinical, labels) — este último caso
+    solo se da cuando el modelo se instancia con use_clinical=True."""
     model.train()
     total_loss = 0.0
-    for signals, labels in loader:
-        signals, labels = signals.to(device), labels.to(device)
+    for batch in loader:
+        if len(batch) == 3:
+            signals, clinical, labels = batch
+            signals, clinical, labels = signals.to(device), clinical.to(device), labels.to(device)
+            logits = model(signals, clinical)
+        else:
+            signals, labels = batch
+            signals, labels = signals.to(device), labels.to(device)
+            logits = model(signals)
         optimizer.zero_grad()
-        logits = model(signals)
         loss   = criterion(logits, labels)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -525,11 +548,20 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scheduler=None)
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device, return_raw: bool = False):
+    """Evalúa el modelo. Cada batch del loader puede traer 2 elementos
+    (signals, labels) o 3 (signals, clinical, labels) — este último caso
+    solo se da cuando el modelo se instancia con use_clinical=True."""
     model.eval()
     total_loss, all_labels, all_probs = 0.0, [], []
-    for signals, labels in loader:
-        signals, labels = signals.to(device), labels.to(device)
-        logits = model(signals)
+    for batch in loader:
+        if len(batch) == 3:
+            signals, clinical, labels = batch
+            signals, clinical, labels = signals.to(device), clinical.to(device), labels.to(device)
+            logits = model(signals, clinical)
+        else:
+            signals, labels = batch
+            signals, labels = signals.to(device), labels.to(device)
+            logits = model(signals)
         total_loss += criterion(logits, labels).item()
         all_probs.append(torch.sigmoid(logits).cpu().numpy())
         all_labels.append(labels.cpu().numpy())

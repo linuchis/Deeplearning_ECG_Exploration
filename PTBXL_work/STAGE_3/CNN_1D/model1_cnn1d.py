@@ -196,56 +196,69 @@ class CNN1D_ResNet(nn.Module):
 
     Canales: 12 → 64 → 128 → 128 → 256 → 256 → GAP → 128 → 5
     Longitud: 1000 → 500 → 500 → 250 → 250 (después de strides)
+
+    El encoder termina en Linear(256→128) + ReLU + Dropout (embedding
+    de proj_dim dimensiones, reutilizable para transfer learning).
+    La cabeza es Linear(128, 5), o Linear(130, 5) si use_clinical=True
+    (128 del embedding + 2 variables clínicas concatenadas).
     """
 
     def __init__(self,
-                 n_leads:   int   = 12,
-                 n_classes: int   = 5,
-                 dropout:   float = 0.3):
+                 n_leads:     int   = 12,
+                 n_classes:   int   = 5,
+                 dropout:     float = 0.3,
+                 proj_dim:    int   = 128,
+                 use_clinical: bool = False):
         super().__init__()
 
-        # ── Capa de entrada ────────────────────────────────────────────
-        # Kernel grande (15) para capturar morfología completa de la onda
-        self.input_conv = nn.Sequential(
+        self.use_clinical = use_clinical
+
+        # ── Encoder ─────────────────────────────────────────────────────
+        # Capa de entrada: kernel grande (15) para capturar morfología
+        # completa de la onda, seguida de los 4 bloques residuales y un
+        # Global Average Pooling (promedia a lo largo del tiempo, resultado
+        # (batch, 256) — independiente de la longitud de entrada). Termina
+        # en un embedding de proj_dim dimensiones (por defecto 128),
+        # reutilizable como vector latente para transfer learning.
+        self.encoder = nn.Sequential(
+            # input_conv
             nn.Conv1d(n_leads, 64, kernel_size=15, padding=7, bias=False),
             nn.BatchNorm1d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool1d(kernel_size=2, stride=2),   # 1000 → 500
-        )
 
-        # ── Bloques residuales ─────────────────────────────────────────
-        self.res_blocks = nn.Sequential(
+            # res_blocks
             ResidualBlock1D(64,  128, kernel_size=7, stride=1, dropout=dropout),
             ResidualBlock1D(128, 128, kernel_size=7, stride=2, dropout=dropout),  # 500→250
             ResidualBlock1D(128, 256, kernel_size=5, stride=1, dropout=dropout),
             ResidualBlock1D(256, 256, kernel_size=5, stride=2, dropout=dropout),  # 250→125
+
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(256, proj_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
         )
 
         # ── Cabeza de clasificación ────────────────────────────────────
-        # Global Average Pooling: promedia a lo largo del tiempo
-        # Resultado: (batch, 256) — independiente de la longitud de entrada
-        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.head = nn.Linear(proj_dim + (2 if use_clinical else 0), n_classes)
+        # Sin sigmoid aquí: BCEWithLogitsLoss lo aplica internamente
+        # (más estable numéricamente)
 
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(256, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(128, n_classes),
-            # Sin sigmoid aquí: BCEWithLogitsLoss lo aplica internamente
-            # (más estable numéricamente)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, clinical: torch.Tensor = None) -> torch.Tensor:
         """
         x: (batch, 12, 1000)
+        clinical: (batch, 2) o None
         retorna: (batch, 5) — logits
         """
-        x = self.input_conv(x)     # (batch, 64,  500)
-        x = self.res_blocks(x)     # (batch, 256, 125)
-        x = self.global_avg_pool(x)  # (batch, 256, 1)
-        x = self.classifier(x)     # (batch, 5)
-        return x
+        z = self.encoder(x)
+        if self.use_clinical and clinical is not None:
+            z = torch.cat([z, clinical], dim=1)
+        return self.head(z)
+
+    def get_embeddings(self, x: torch.Tensor) -> torch.Tensor:
+        """Devuelve el vector latente (batch, proj_dim) sin pasar por la cabeza."""
+        return self.encoder(x)
 
 
 # ── MÉTRICAS DE EVALUACIÓN ────────────────────────────────────────────
@@ -305,12 +318,20 @@ def train_one_epoch(model:      nn.Module,
     model.train()
     total_loss = 0.0
 
-    for signals, labels in loader:
+    batch = next(iter(loader)); n = len(batch)
+
+    for batch in loader:
+        if n == 3:
+            signals, labels, clinical = batch
+            clinical = clinical.to(device)
+        else:
+            signals, labels = batch
+            clinical = None
         signals = signals.to(device)
         labels  = labels.to(device)
 
         optimizer.zero_grad()
-        logits = model(signals)
+        logits = model(signals, clinical)
         loss   = criterion(logits, labels)
         loss.backward()
 
@@ -338,11 +359,19 @@ def evaluate(model:     nn.Module,
     all_labels  = []
     all_probs   = []
 
-    for signals, labels in loader:
+    batch = next(iter(loader)); n = len(batch)
+
+    for batch in loader:
+        if n == 3:
+            signals, labels, clinical = batch
+            clinical = clinical.to(device)
+        else:
+            signals, labels = batch
+            clinical = None
         signals = signals.to(device)
         labels  = labels.to(device)
 
-        logits = model(signals)
+        logits = model(signals, clinical)
         loss   = criterion(logits, labels)
         total_loss += loss.item()
 
