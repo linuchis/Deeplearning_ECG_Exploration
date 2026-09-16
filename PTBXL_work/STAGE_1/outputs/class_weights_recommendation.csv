@@ -1,6 +1,0 @@
-class,n_positive,n_negative,pos_weight_bce,balanced_weight_sklearn_style
-NORM,9514,12285,1.2913,0.4583
-MI,5469,16330,2.9859,0.7972
-STTC,5235,16564,3.1641,0.8328
-CD,4898,16901,3.4506,0.8901
-HYP,2649,19150,7.2291,1.6458
