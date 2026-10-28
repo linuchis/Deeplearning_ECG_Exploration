@@ -249,15 +249,13 @@ class CNN_LSTM(nn.Module):
 
     Flujo de datos:
       (batch, 12, 1000)
-        ↓  encoder_cnn (ConvFeatureExtractor)
+        ↓  ConvFeatureExtractor
       (batch, 125, 256)    ← secuencia de 125 vectores de 256 features
-        ↓  encoder_lstm (LSTM bidireccional, 2 capas)
+        ↓  LSTM bidireccional (2 capas)
       (batch, 125, 512)    ← 256 forward + 256 backward
         ↓  Max pooling sobre el tiempo (readout V2, ver docstring del módulo)
       (batch, 512)
-        ↓  encoder_proj: Linear(512→128) + ReLU + Dropout
-      (batch, 128)         ← embedding, reutilizable para transfer learning
-        ↓  head: Linear(128, 5), o Linear(130, 5) si use_clinical=True
+        ↓  Clasificador FC
       (batch, 5)           ← logits
 
     Por qué LSTM bidireccional:
@@ -286,20 +284,16 @@ class CNN_LSTM(nn.Module):
                  n_classes:   int   = 5,
                  hidden_size: int   = 256,
                  num_layers:  int   = 2,
-                 dropout:     float = 0.3,
-                 proj_dim:    int   = 128,
-                 use_clinical: bool = False):
+                 dropout:     float = 0.3):
         super().__init__()
 
-        self.use_clinical = use_clinical
-
         # Extractor CNN
-        self.encoder_cnn = ConvFeatureExtractor(n_leads=n_leads, dropout=dropout)
+        self.cnn = ConvFeatureExtractor(n_leads=n_leads, dropout=dropout)
 
         # LSTM bidireccional
         # input_size = 256 (features de salida del CNN)
         # hidden_size = 256, bidireccional → salida efectiva = 512
-        self.encoder_lstm = nn.LSTM(
+        self.lstm = nn.LSTM(
             input_size   = 256,
             hidden_size  = hidden_size,
             num_layers   = num_layers,
@@ -308,30 +302,30 @@ class CNN_LSTM(nn.Module):
             dropout      = dropout if num_layers > 1 else 0.0,
         )
 
-        # Proyección del readout LSTM (hidden_size*2, bidireccional) a
-        # un embedding de proj_dim dimensiones, reutilizable para transfer learning.
-        self.encoder_proj = nn.Sequential(
-            nn.Linear(hidden_size * 2, proj_dim),
+        # Clasificador
+        # Entrada: hidden_size * 2 (bidireccional)
+        lstm_out_size = hidden_size * 2
+
+        self.classifier = nn.Sequential(
+            nn.Linear(lstm_out_size, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
+            nn.Linear(128, n_classes),
+            # Sin sigmoid: BCEWithLogitsLoss lo aplica internamente
         )
 
-        # Cabeza de clasificación
-        self.head = nn.Linear(proj_dim + (2 if use_clinical else 0), n_classes)
-        # Sin sigmoid: BCEWithLogitsLoss lo aplica internamente
-
-    def forward(self, x: torch.Tensor, clinical: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (batch, 12, 1000)
-        clinical: (batch, 2) o None
         retorna: (batch, 5) — logits
         """
         # Extracción CNN
-        z = self.encoder_cnn(x)           # (batch, 125, 256)
+        features = self.cnn(x)           # (batch, 125, 256)
 
         # LSTM — retorna (output, (h_n, c_n))
-        # lstm_out : (batch, 125, 512)
-        lstm_out, _ = self.encoder_lstm(z)
+        # output : (batch, 125, 512)
+        # h_n    : (num_layers*2, batch, 256)  ← ya no se usa (era el readout de la V1)
+        lstm_out, _ = self.lstm(features)
 
         # ── Readout V2: max pooling sobre la dimensión temporal ─────────
         # V1 usaba solo lstm_out[:, -1, :] (último paso temporal), lo que
@@ -345,17 +339,8 @@ class CNN_LSTM(nn.Module):
         # solo nos interesan los valores para el clasificador.
         pooled = lstm_out.max(dim=1).values   # (batch, 125, 512) → (batch, 512)
 
-        z = self.encoder_proj(pooled)     # (batch, 128)
-        if self.use_clinical and clinical is not None:
-            z = torch.cat([z, clinical], dim=1)
-        return self.head(z)
-
-    def get_embeddings(self, x: torch.Tensor) -> torch.Tensor:
-        """Devuelve el vector latente (batch, proj_dim) sin pasar por la cabeza."""
-        z = self.encoder_cnn(x)
-        lstm_out, _ = self.encoder_lstm(z)
-        pooled = lstm_out.max(dim=1).values
-        return self.encoder_proj(pooled)
+        logits = self.classifier(pooled)  # (batch, 5)
+        return logits
 
 
 # ── MÉTRICAS (idénticas al Modelo 1 para comparación justa) ──────────
@@ -394,21 +379,10 @@ def compute_metrics(all_labels: np.ndarray,
 def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
     total_loss = 0.0
-
-    batch = next(iter(loader)); n = len(batch)
-
-    for batch in loader:
-        if n == 3:
-            signals, labels, clinical = batch
-            clinical = clinical.to(device)
-        else:
-            signals, labels = batch
-            clinical = None
-        signals = signals.to(device)
-        labels  = labels.to(device)
-
+    for signals, labels in loader:
+        signals, labels = signals.to(device), labels.to(device)
         optimizer.zero_grad()
-        logits = model(signals, clinical)
+        logits = model(signals)
         loss   = criterion(logits, labels)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -421,20 +395,9 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 def evaluate(model, loader, criterion, device, return_raw: bool = False):
     model.eval()
     total_loss, all_labels, all_probs = 0.0, [], []
-
-    batch = next(iter(loader)); n = len(batch)
-
-    for batch in loader:
-        if n == 3:
-            signals, labels, clinical = batch
-            clinical = clinical.to(device)
-        else:
-            signals, labels = batch
-            clinical = None
-        signals = signals.to(device)
-        labels  = labels.to(device)
-
-        logits  = model(signals, clinical)
+    for signals, labels in loader:
+        signals, labels = signals.to(device), labels.to(device)
+        logits  = model(signals)
         loss    = criterion(logits, labels)
         total_loss += loss.item()
         all_probs.append(torch.sigmoid(logits).cpu().numpy())
